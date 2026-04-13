@@ -14,7 +14,6 @@ defmodule Flagon.Connection.Kdb do
       ]
       |> maybe_add(:username, config)
       |> maybe_add(:password, config)
-      |> maybe_add(:name, config)
 
     ExeQute.connect(opts)
   end

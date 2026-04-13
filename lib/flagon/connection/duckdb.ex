@@ -10,9 +10,14 @@ defmodule Flagon.Connection.DuckDB do
   @impl true
   def connect(config) do
     path = Map.get(config, :path, ":memory:")
-    path_charlist = String.to_charlist(path)
 
-    with {:ok, db} <- Duckdbex.open(path_charlist),
+    db_result =
+      case path do
+        ":memory:" -> Duckdbex.open()
+        p -> Duckdbex.open(p)
+      end
+
+    with {:ok, db} <- db_result,
          {:ok, conn} <- Duckdbex.connection(db) do
       name = to_string(config.name)
       register(name, %{db: db, conn: conn, path: path})
@@ -39,13 +44,15 @@ defmodule Flagon.Connection.DuckDB do
   def query(conn, query_string, _params) do
     started = System.monotonic_time(:millisecond)
 
-    with {:ok, result_ref} <- Duckdbex.query(conn, query_string),
-         columns <- Duckdbex.columns(result_ref),
-         {:ok, rows} <- fetch_all_rows(result_ref) do
-      elapsed = System.monotonic_time(:millisecond) - started
-      {:ok, build_result(columns, rows, elapsed)}
-    else
-      {:error, reason} -> {:error, reason}
+    case Duckdbex.query(conn, query_string) do
+      {:ok, result_ref} ->
+        columns = Duckdbex.columns(result_ref)
+        rows = Duckdbex.fetch_all(result_ref)
+        elapsed = System.monotonic_time(:millisecond) - started
+        {:ok, build_result(columns, rows, elapsed)}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -57,18 +64,6 @@ defmodule Flagon.Connection.DuckDB do
   @impl true
   def stream_query(_conn, _query_string, _opts) do
     {:error, :not_yet_implemented}
-  end
-
-  defp fetch_all_rows(result_ref) do
-    fetch_all_rows(result_ref, [])
-  end
-
-  defp fetch_all_rows(result_ref, acc) do
-    case Duckdbex.fetch_chunk(result_ref) do
-      {:ok, []} -> {:ok, Enum.reverse(acc) |> List.flatten()}
-      {:ok, chunk} -> fetch_all_rows(result_ref, [chunk | acc])
-      {:error, reason} -> {:error, reason}
-    end
   end
 
   defp build_result(columns, rows, elapsed) do

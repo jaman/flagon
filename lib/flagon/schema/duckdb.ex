@@ -92,20 +92,8 @@ defmodule Flagon.Schema.DuckDB do
   end
 
   defp run_query(conn, sql) do
-    with {:ok, result_ref} <- Duckdbex.query(conn, sql),
-         {:ok, rows} <- fetch_all(result_ref) do
-      {:ok, rows}
-    end
-  end
-
-  defp fetch_all(result_ref) do
-    fetch_all(result_ref, [])
-  end
-
-  defp fetch_all(result_ref, acc) do
-    case Duckdbex.fetch_chunk(result_ref) do
-      {:ok, []} -> {:ok, Enum.reverse(acc) |> List.flatten()}
-      {:ok, chunk} -> fetch_all(result_ref, [chunk | acc])
+    case Duckdbex.query(conn, sql) do
+      {:ok, result_ref} -> {:ok, Duckdbex.fetch_all(result_ref)}
       {:error, reason} -> {:error, reason}
     end
   end

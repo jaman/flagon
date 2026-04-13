@@ -30,8 +30,8 @@ defmodule Flagon.Schema.Kdb do
   end
 
   defp load_tables(conn, namespace) do
-    case ExeQute.tables(conn, namespace) do
-      {:ok, table_names} ->
+    case safe_call(fn -> ExeQute.tables(conn, namespace) end) do
+      {:ok, table_names} when is_list(table_names) ->
         Enum.map(table_names, fn name ->
           %{
             id: {:table, namespace, name},
@@ -48,7 +48,7 @@ defmodule Flagon.Schema.Kdb do
   end
 
   defp load_columns(conn, table_name) do
-    case ExeQute.query(conn, "meta #{table_name}") do
+    case safe_call(fn -> ExeQute.query(conn, "meta #{table_name}") end) do
       {:ok, rows} when is_list(rows) ->
         Enum.map(rows, fn row ->
           col_name = Map.get(row, "c", Map.get(row, :c, "?"))
@@ -69,8 +69,8 @@ defmodule Flagon.Schema.Kdb do
   end
 
   defp load_functions(conn, namespace) do
-    case ExeQute.functions(conn, namespace) do
-      {:ok, funcs} ->
+    case safe_call(fn -> ExeQute.functions(conn, namespace) end) do
+      {:ok, funcs} when is_list(funcs) ->
         Enum.map(funcs, fn func ->
           name = Map.get(func, "name", "?")
           params = Map.get(func, "params", [])
@@ -96,12 +96,12 @@ defmodule Flagon.Schema.Kdb do
   end
 
   defp load_variables(conn, namespace) do
-    case ExeQute.variables(conn, namespace) do
-      {:ok, vars} ->
+    case safe_call(fn -> ExeQute.variables(conn, namespace) end) do
+      {:ok, vars} when is_list(vars) ->
         Enum.map(vars, fn name ->
           %{
             id: {:var, namespace, name},
-            label: name,
+            label: to_string(name),
             type: :variable,
             children: [],
             metadata: %{namespace: namespace, variable: name}
@@ -111,6 +111,14 @@ defmodule Flagon.Schema.Kdb do
       _ ->
         []
     end
+  end
+
+  defp safe_call(fun) do
+    fun.()
+  rescue
+    _ -> {:error, :introspection_failed}
+  catch
+    _, _ -> {:error, :introspection_failed}
   end
 
   defp qualified_name(".", name), do: name

@@ -8,13 +8,24 @@ defmodule Flagon.App do
   def mount(_props) do
     config = Process.get(:flagon_config, Flagon.Config.load())
 
+    conn_names =
+      Enum.map(config.connections, fn c ->
+        {to_string(c.name), to_string(c.name)}
+      end)
+
+    first_name =
+      case config.connections do
+        [first | _] -> to_string(first.name)
+        [] -> nil
+      end
+
     %{
       config: config,
       connections: config.connections,
+      conn_names: conn_names,
       conn_schemas: %{},
       conn_statuses: %{},
-      query_target: nil,
-      selected_node: nil,
+      query_target: first_name,
       query_text: "",
       result: nil,
       result_page: 1,
@@ -44,17 +55,14 @@ defmodule Flagon.App do
     vertical([
       render_header(state),
       render_main(state),
-      render_footer()
+      footer()
     ])
   end
 
   def keybindings do
     [
       {"F5", "Run"},
-      {"Ctrl+E", "Export"},
-      {"Ctrl+H", "History"},
       {"Ctrl+R", "Refresh"},
-      {"Esc", "Cancel"},
       {"Ctrl+Q", "Quit"}
     ]
   end
@@ -78,10 +86,21 @@ defmodule Flagon.App do
 
   def handle_event(_event, state), do: {:noreply, state}
 
+  def handle_event(:connection_selected, conn_name, state) when is_binary(conn_name) do
+    switch_connection(conn_name, state)
+  end
+
+  def handle_event(:connection_selected, %{id: conn_name}, state) do
+    switch_connection(to_string(conn_name), state)
+  end
+
   def handle_event(:run_query, _data, state), do: run_query(state)
 
-  def handle_event(:schema_node_selected, %{selected: [id]}, state) do
-    handle_node_select(id, state)
+  def handle_event(:schema_node_selected, [%{id: {:table, _, _}, metadata: meta} | _], state) do
+    conn_type = connection_type_for(state.query_target, state)
+    node = %{type: :table, metadata: meta}
+    query = Flagon.Schema.default_query_for(node, conn_type, state.page_size)
+    {:ok, %{state | query_text: query}}
   end
 
   def handle_event(:schema_node_selected, _data, state), do: {:noreply, state}
@@ -101,30 +120,8 @@ defmodule Flagon.App do
     end
   end
 
-  def handle_event(:quick_select_top, _data, state) do
-    case selected_table_info(state) do
-      {conn_name, node} ->
-        conn_type = connection_type_for(conn_name, state)
-        query = Flagon.Schema.default_query_for(node, conn_type, 1000)
-        state = %{state | query_text: query, query_target: conn_name}
-        run_query(state)
-
-      nil ->
-        {:noreply, state}
-    end
-  end
-
-  def handle_event(:quick_count, _data, state) do
-    case selected_table_info(state) do
-      {conn_name, %{metadata: meta}} ->
-        query = build_count_query(conn_name, meta, state)
-        state = %{state | query_text: query, query_target: conn_name}
-        run_query(state)
-
-      nil ->
-        {:noreply, state}
-    end
-  end
+  def handle_event(:quick_select_top, _data, state), do: {:noreply, state}
+  def handle_event(:quick_count, _data, state), do: {:noreply, state}
 
   def handle_event(_event, _data, state), do: {:noreply, state}
 
@@ -147,8 +144,7 @@ defmodule Flagon.App do
 
   def on_message({:connected, name}, state) do
     statuses = Map.put(state.conn_statuses, name, :connected)
-    target = state.query_target || name
-    %{state | conn_statuses: statuses, query_target: target}
+    %{state | conn_statuses: statuses}
   end
 
   def on_message({:connect_failed, name, reason}, state) do
@@ -168,20 +164,23 @@ defmodule Flagon.App do
   def on_message(_msg, state), do: state
 
   defp render_header(state) do
-    target_label =
+    conn_label =
       case state.query_target do
-        nil -> "No target"
-        name -> "Target: #{name}"
+        nil -> "No connection"
+        name ->
+          status = Map.get(state.conn_statuses, name, :disconnected)
+          type_label = connection_type_label(state.query_target, state)
+          "#{name} (#{type_label}) [#{status}]"
       end
 
     status =
       cond do
-        state.executing? -> " [running...]"
-        state.error -> " [error]"
+        state.executing? -> " | running..."
+        state.error -> " | error"
         true -> ""
       end
 
-    header("Flagon  #{target_label}#{status}")
+    header("Flagon  Server: #{conn_label}#{status}")
   end
 
   defp render_main(state) do
@@ -206,47 +205,42 @@ defmodule Flagon.App do
   end
 
   defp render_left_panel(state) do
-    split_pane(
-      [
-        render_connection_tree(state),
-        render_connection_info(state)
-      ],
-      orientation: :vertical,
-      ratio: 0.75,
-      id: :left_split
-    )
+    vertical([
+      label("Servers", style: %{bold: true}),
+      option_list(
+        state.conn_names,
+        id: :conn_list,
+        on_select: :connection_selected,
+        height: max(3, length(state.conn_names) + 1)
+      ),
+      label("", height: 1),
+      render_schema_tree(state)
+    ])
   end
 
-  defp render_connection_tree(state) do
-    tree_data = build_connection_tree(state)
+  defp render_schema_tree(state) do
+    schema_data =
+      case state.query_target do
+        nil -> []
+        name -> Map.get(state.conn_schemas, name, [])
+      end
 
-    tree(
-      id: :schema_tree,
-      data: Flagon.Schema.to_tree_data(tree_data),
-      selection_mode: :single,
-      on_select: :schema_node_selected
-    )
-  end
+    if schema_data == [] do
+      status = Map.get(state.conn_statuses, state.query_target, :disconnected)
 
-  defp render_connection_info(state) do
-    case find_selected_connection(state) do
-      nil ->
-        label("Select a connection", style: %{dim: true})
-
-      {name, conn_config} ->
-        status = Map.get(state.conn_statuses, name, :disconnected)
-
-        vertical([
-          label(name, style: %{bold: true}),
-          label("Type: #{conn_config.type}"),
-          label(connection_address(conn_config)),
-          label("Status: #{status}"),
-          if state.query_target == name do
-            label("Active query target", style: %{fg: {100, 255, 100}})
-          else
-            label("")
-          end
-        ])
+      case status do
+        :connecting -> label("Connecting...", style: %{dim: true})
+        :error -> label("Connection failed", style: %{fg: {255, 80, 80}})
+        _ -> label("No schema loaded", style: %{dim: true})
+      end
+    else
+      tree(
+        id: :schema_tree,
+        data: Flagon.Schema.to_tree_data(schema_data),
+        selection_mode: :single,
+        on_select: :schema_node_selected,
+        flex: 1
+      )
     end
   end
 
@@ -254,7 +248,7 @@ defmodule Flagon.App do
     vertical([
       text_area(
         id: :query_editor,
-        text: state.query_text,
+        bind: :query_text,
         placeholder: query_placeholder(state),
         show_line_numbers: true,
         flex: 1
@@ -264,44 +258,19 @@ defmodule Flagon.App do
   end
 
   defp render_toolbar(state) do
-    quick_actions = render_quick_actions(state)
-
     horizontal(
       [
         button(
           if(state.executing?, do: "Running...", else: "Run (F5)"),
           on_click: :run_query,
+          compact: true,
           style: %{bold: true}
         ),
-        button("Refresh", on_click: :refresh_schema)
-      ] ++ quick_actions,
-      gap: 1
+        button("Refresh", on_click: :refresh_schema, compact: true)
+      ],
+      gap: 1,
+      height: 1
     )
-  end
-
-  defp render_quick_actions(state) do
-    case selected_table_info(state) do
-      nil ->
-        []
-
-      {_conn_name, _table_node} ->
-        [
-          button("Select Top 1000", on_click: :quick_select_top),
-          button("Count", on_click: :quick_count)
-        ]
-    end
-  end
-
-  defp selected_table_info(state) do
-    case state.selected_node do
-      {:table, _, _} = id ->
-        conn_name = find_owning_connection(id, state)
-        node = find_node_by_id(id, state)
-        if conn_name && node, do: {conn_name, node}
-
-      _ ->
-        nil
-    end
   end
 
   defp render_results_panel(state) do
@@ -355,115 +324,48 @@ defmodule Flagon.App do
 
     horizontal(
       [
-        button("< Prev", on_click: :prev_page),
+        button("< Prev", on_click: :prev_page, compact: true),
         label(info, style: %{dim: true}),
-        button("Next >", on_click: :next_page)
+        button("Next >", on_click: :next_page, compact: true)
       ],
-      gap: 1
+      gap: 1,
+      height: 1
     )
   end
 
-  defp render_footer do
-    footer()
-  end
+  defp switch_connection(name, state) do
+    caller = self()
+    status = Map.get(state.conn_statuses, name, :disconnected)
 
-  defp build_connection_tree(state) do
-    Enum.map(state.connections, fn conn_config ->
-      name = to_string(conn_config.name)
-      status = Map.get(state.conn_statuses, name, :disconnected)
-      children = Map.get(state.conn_schemas, name, [])
+    state = %{state | query_target: name, error: nil}
 
-      Flagon.Schema.connection_node(name, conn_config.type, status, children)
-    end)
-  end
+    if status != :connected do
+      Task.start(fn ->
+        case Flagon.Connection.Manager.connect(name) do
+          {:ok, _} ->
+            send(caller, {:connected, name})
+            Flagon.Connection.Manager.switch(name)
 
-  defp handle_node_select({:conn, name}, state) do
-    {:ok, %{state | query_target: name, selected_node: {:conn, name}}}
-  end
+            case Flagon.Connection.Manager.introspect_connection(name) do
+              {:ok, tree} -> send(caller, {:schema_loaded, name, {:ok, tree}})
+              error -> send(caller, {:schema_loaded, name, error})
+            end
 
-  defp handle_node_select({:table, _ns_or_schema, _table} = id, state) do
-    conn_name = find_owning_connection(id, state)
+          {:error, reason} ->
+            send(caller, {:connect_failed, name, reason})
+        end
+      end)
 
-    case conn_name do
-      nil ->
-        {:ok, %{state | selected_node: id}}
-
-      name ->
-        conn_type = connection_type_for(name, state)
-        node = find_node_by_id(id, state)
-        query = Flagon.Schema.default_query_for(node, conn_type, state.page_size)
-
-        {:ok, %{state | query_target: name, query_text: query, selected_node: id}}
-    end
-  end
-
-  defp handle_node_select(id, state) do
-    conn_name = find_owning_connection(id, state)
-
-    if conn_name do
-      {:ok, %{state | query_target: conn_name, selected_node: id}}
+      statuses = Map.put(state.conn_statuses, name, :connecting)
+      {:ok, %{state | conn_statuses: statuses}}
     else
-      {:ok, %{state | selected_node: id}}
-    end
-  end
-
-  defp find_owning_connection(node_id, state) do
-    Enum.find_value(state.connections, fn conn_config ->
-      name = to_string(conn_config.name)
-      children = Map.get(state.conn_schemas, name, [])
-
-      if node_in_tree?(node_id, children) do
-        name
-      end
-    end)
-  end
-
-  defp node_in_tree?(target_id, nodes) do
-    Enum.any?(nodes, fn node ->
-      node.id == target_id ||
-        (is_list(node.children) && node_in_tree?(target_id, node.children))
-    end)
-  end
-
-  defp find_node_by_id(target_id, state) do
-    Enum.find_value(state.conn_schemas, fn {_name, nodes} ->
-      find_in_tree(target_id, nodes)
-    end)
-  end
-
-  defp find_in_tree(target_id, nodes) do
-    Enum.find_value(nodes, fn node ->
-      cond do
-        node.id == target_id -> node
-        is_list(node.children) -> find_in_tree(target_id, node.children)
-        true -> nil
-      end
-    end)
-  end
-
-  defp find_selected_connection(state) do
-    name =
-      case state.selected_node do
-        {:conn, n} -> n
-        _ -> state.query_target
-      end
-
-    case name do
-      nil ->
-        nil
-
-      n ->
-        config = Enum.find(state.connections, &(to_string(&1.name) == n))
-        if config, do: {n, config}
+      Flagon.Connection.Manager.switch(name)
+      {:ok, state}
     end
   end
 
   defp run_query(state) do
-    query_text =
-      case Drafter.get_widget_value(:query_editor) do
-        nil -> state.query_text
-        text -> String.trim(text)
-      end
+    query_text = String.trim(state.query_text || "")
 
     cond do
       query_text == "" ->
@@ -483,7 +385,7 @@ defmodule Flagon.App do
             send(caller, {:query_complete, result})
           end)
 
-        {:ok, %{state | executing?: true, error: nil, query_text: query_text, query_task: task}}
+        {:ok, %{state | executing?: true, error: nil, query_task: task}}
     end
   end
 
@@ -541,32 +443,13 @@ defmodule Flagon.App do
     end
   end
 
-  defp connection_address(%{dsn: dsn}) when is_binary(dsn), do: dsn
-  defp connection_address(%{path: path}) when is_binary(path), do: path
-
-  defp connection_address(config) do
-    host = Map.get(config, :host, "localhost")
-    port = Map.get(config, :port, "")
-    "#{host}:#{port}"
-  end
-
-  defp build_count_query(conn_name, meta, state) do
-    case connection_type_for(conn_name, state) do
-      :kdb ->
-        ns = Map.get(meta, :namespace, "")
-        table = Map.get(meta, :table, "")
-        qualified = qualified_kdb_name(ns, table)
-        "count #{qualified}"
-
-      _ ->
-        schema = Map.get(meta, :schema, "public")
-        table = Map.get(meta, :table, "")
-        "SELECT COUNT(*) FROM #{schema}.#{table}"
+  defp connection_type_label(name, state) do
+    case connection_type_for(name, state) do
+      :kdb -> "KDB"
+      :postgres -> "PostgreSQL"
+      :duckdb -> "DuckDB"
+      _ -> "?"
     end
   end
 
-  defp qualified_kdb_name(".", name), do: name
-  defp qualified_kdb_name(".root", name), do: name
-  defp qualified_kdb_name("", name), do: name
-  defp qualified_kdb_name(ns, name), do: "#{ns}.#{name}"
 end

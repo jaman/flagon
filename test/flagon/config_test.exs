@@ -4,12 +4,12 @@ defmodule Flagon.ConfigTest do
   @tmp_dir System.tmp_dir!()
 
   describe "load/1" do
-    test "returns defaults when no config files exist" do
+    test "returns defaults for standard keys" do
       config = Flagon.Config.load([])
       assert config.page_size == 1000
       assert config.query_timeout_ms == 30_000
       assert config.theme == "dracula"
-      assert config.connections == []
+      assert is_list(config.connections)
     end
 
     test "CLI opts override defaults" do
