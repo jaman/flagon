@@ -148,7 +148,12 @@ defmodule Flagon.App do
 
   def on_message({:connect_failed, name, reason}, state) do
     statuses = Map.put(state.conn_statuses, name, :error)
-    %{state | conn_statuses: statuses, error: "#{name}: #{inspect(reason)}"}
+    %{state | conn_statuses: statuses, executing?: false, query_task: nil, error: "#{name}: #{inspect(reason)}"}
+  end
+
+  def on_message({:query_reconnecting, name}, state) do
+    statuses = Map.put(state.conn_statuses, name, :connecting)
+    %{state | conn_statuses: statuses}
   end
 
   def on_message({:schema_loaded, name, {:ok, tree}}, state) do
@@ -310,7 +315,8 @@ defmodule Flagon.App do
           zebra_stripes: true,
           show_header: true,
           show_scrollbars: true,
-          column_fit_mode: :fit
+          column_fit_mode: :expand,
+          cursor_type: :cell
         )
       ],
       flex: 1
@@ -337,29 +343,35 @@ defmodule Flagon.App do
 
     state = %{state | query_target: name, error: nil}
 
-    if status != :connected do
-      Task.start(fn ->
-        case Flagon.Connection.Manager.connect(name) do
-          {:ok, _} ->
-            send(caller, {:connected, name})
-            Flagon.Connection.Manager.switch(name)
-
-            case Flagon.Connection.Manager.introspect_connection(name) do
-              {:ok, tree} -> send(caller, {:schema_loaded, name, {:ok, tree}})
-              error -> send(caller, {:schema_loaded, name, error})
-            end
-
-          {:error, reason} ->
-            send(caller, {:connect_failed, name, reason})
-        end
-      end)
-
-      statuses = Map.put(state.conn_statuses, name, :connecting)
-      {:ok, %{state | conn_statuses: statuses}}
-    else
+    if status == :connected do
       Flagon.Connection.Manager.switch(name)
       {:ok, state}
+    else
+      attempt_connect(name, caller, state)
     end
+  end
+
+  defp attempt_connect(name, caller, state) do
+    Task.start(fn ->
+      Flagon.Connection.Manager.disconnect(name)
+
+      case Flagon.Connection.Manager.connect(name) do
+        {:ok, _} ->
+          send(caller, {:connected, name})
+          Flagon.Connection.Manager.switch(name)
+
+          case Flagon.Connection.Manager.introspect_connection(name) do
+            {:ok, tree} -> send(caller, {:schema_loaded, name, {:ok, tree}})
+            error -> send(caller, {:schema_loaded, name, error})
+          end
+
+        {:error, reason} ->
+          send(caller, {:connect_failed, name, reason})
+      end
+    end)
+
+    statuses = Map.put(state.conn_statuses, name, :connecting)
+    {:ok, %{state | conn_statuses: statuses}}
   end
 
   defp run_query(state) do
@@ -375,16 +387,44 @@ defmodule Flagon.App do
       true ->
         caller = self()
         target = state.query_target
+        timeout = state.config.query_timeout_ms
 
         task =
           Task.async(fn ->
             Flagon.Connection.Manager.switch(target)
-            result = Flagon.Query.Executor.execute_sync(query_text, timeout: state.config.query_timeout_ms)
-            send(caller, {:query_complete, result})
+            result = safe_execute(query_text, timeout)
+
+            case result do
+              {:ok, _} ->
+                send(caller, {:query_complete, result})
+
+              {:error, _} ->
+                send(caller, {:query_reconnecting, target})
+                Flagon.Connection.Manager.disconnect(target)
+
+                case Flagon.Connection.Manager.connect(target) do
+                  {:ok, _} ->
+                    send(caller, {:connected, target})
+                    Flagon.Connection.Manager.switch(target)
+                    retry = safe_execute(query_text, timeout)
+                    send(caller, {:query_complete, retry})
+
+                  {:error, reason} ->
+                    send(caller, {:connect_failed, target, reason})
+                end
+            end
           end)
 
         {:ok, %{state | executing?: true, error: nil, query_task: task}}
     end
+  end
+
+  defp safe_execute(query_text, timeout) do
+    Flagon.Query.Executor.execute_sync(query_text, timeout: timeout)
+  rescue
+    error -> {:error, Exception.message(error)}
+  catch
+    :exit, reason -> {:error, {:exit, inspect(reason)}}
   end
 
   defp start_connect(conn_config, state) do

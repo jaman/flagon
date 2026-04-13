@@ -124,7 +124,9 @@ defmodule Flagon.Connection.Manager do
         {:reply, {:ok, conn}, %{state | active: name}}
 
       conn_state ->
-        case conn_state.adapter.connect(conn_state.config) do
+        result = safe_connect(conn_state.adapter, conn_state.config)
+
+        case result do
           {:ok, conn} ->
             updated = %{conn_state | conn: conn, status: :connected, error: nil}
             connections = Map.put(state.connections, name, updated)
@@ -308,12 +310,44 @@ defmodule Flagon.Connection.Manager do
     {:reply, result, state}
   end
 
+  defp safe_connect(adapter, config) do
+    caller = self()
+
+    {pid, ref} =
+      spawn_monitor(fn ->
+        result = adapter.connect(config)
+        send(caller, {:connect_result, self(), result})
+      end)
+
+    receive do
+      {:connect_result, ^pid, result} ->
+        Process.demonitor(ref, [:flush])
+        result
+
+      {:DOWN, ^ref, :process, ^pid, reason} ->
+        {:error, reason}
+    after
+      10_000 ->
+        Process.demonitor(ref, [:flush])
+        Process.exit(pid, :kill)
+        {:error, :connect_timeout}
+    end
+  end
+
   defp with_active_connection(state, fun) do
     case state.active do
       nil -> {:error, :no_active_connection}
       name ->
         case Map.get(state.connections, name) do
-          %{status: :connected} = conn_state -> fun.(conn_state)
+          %{status: :connected} = conn_state ->
+            try do
+              fun.(conn_state)
+            rescue
+              error -> {:error, Exception.message(error)}
+            catch
+              :exit, reason -> {:error, reason}
+            end
+
           _ -> {:error, :not_connected}
         end
     end
