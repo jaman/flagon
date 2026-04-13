@@ -5,6 +5,8 @@ defmodule Flagon.App do
 
   use Drafter.App
 
+  @editor_table :flagon_editor_state
+
   def mount(_props) do
     config = Process.get(:flagon_config, Flagon.Config.load())
 
@@ -19,6 +21,8 @@ defmodule Flagon.App do
         [] -> nil
       end
 
+    init_editor_table()
+
     %{
       config: config,
       connections: config.connections,
@@ -26,7 +30,7 @@ defmodule Flagon.App do
       conn_schemas: %{},
       conn_statuses: %{},
       query_target: first_name,
-      query_text: "",
+      query_text: load_editor(first_name),
       result: nil,
       result_page: 1,
       page_size: config.page_size,
@@ -338,10 +342,13 @@ defmodule Flagon.App do
   end
 
   defp switch_connection(name, state) do
+    save_editor(state.query_target, state.query_text)
+
     caller = self()
     status = Map.get(state.conn_statuses, name, :disconnected)
+    restored_text = load_editor(name)
 
-    state = %{state | query_target: name, error: nil}
+    state = %{state | query_target: name, error: nil, query_text: restored_text}
 
     if status == :connected do
       Flagon.Connection.Manager.switch(name)
@@ -490,4 +497,24 @@ defmodule Flagon.App do
     end
   end
 
+  defp init_editor_table do
+    if :ets.whereis(@editor_table) == :undefined do
+      :ets.new(@editor_table, [:named_table, :public, :set])
+    end
+  end
+
+  defp save_editor(nil, _text), do: :ok
+
+  defp save_editor(name, text) do
+    :ets.insert(@editor_table, {name, text})
+  end
+
+  defp load_editor(nil), do: ""
+
+  defp load_editor(name) do
+    case :ets.lookup(@editor_table, name) do
+      [{^name, text}] -> text
+      _ -> ""
+    end
+  end
 end
