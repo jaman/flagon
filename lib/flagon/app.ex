@@ -67,6 +67,8 @@ defmodule Flagon.App do
     [
       {"F5", "Run"},
       {"Ctrl+R", "Refresh"},
+      {"Ctrl+S", "Export CSV"},
+      {"Ctrl+Y", "Copy"},
       {"Ctrl+Q", "Quit"}
     ]
   end
@@ -83,6 +85,24 @@ defmodule Flagon.App do
   def handle_event({:key, :escape}, %{executing?: true} = state) do
     if state.query_task, do: Task.shutdown(state.query_task, :brutal_kill)
     {:ok, %{state | executing?: false, query_task: nil}}
+  end
+
+  def handle_event({:key, :s, [:ctrl]}, state) do
+    case state.result do
+      nil -> {:noreply, state}
+      result -> export_csv(result, state)
+    end
+  end
+
+  def handle_event({:key, :y, [:ctrl]}, state) do
+    case state.result do
+      nil -> {:noreply, state}
+      result ->
+        case Flagon.Export.Clipboard.copy(result) do
+          :ok -> {:ok, %{state | error: nil}}
+          {:error, reason} -> {:ok, %{state | error: "Copy failed: #{inspect(reason)}"}}
+        end
+    end
   end
 
   def handle_event({:key, :q, [:ctrl]}, _state), do: {:stop, :normal}
@@ -516,5 +536,21 @@ defmodule Flagon.App do
       [{^name, text}] -> text
       _ -> ""
     end
+  end
+
+  defp export_csv(result, state) do
+    path = Path.expand("~/Downloads/flagon_export_#{export_timestamp()}.csv")
+
+    case Flagon.Export.CSV.export(result, path) do
+      :ok -> {:ok, %{state | error: nil}}
+      {:error, reason} -> {:ok, %{state | error: "Export failed: #{inspect(reason)}"}}
+    end
+  end
+
+  defp export_timestamp do
+    {{y, m, d}, {h, min, s}} = :calendar.local_time()
+
+    :io_lib.format("~4..0B~2..0B~2..0B_~2..0B~2..0B~2..0B", [y, m, d, h, min, s])
+    |> IO.iodata_to_binary()
   end
 end
