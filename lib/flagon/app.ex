@@ -68,7 +68,6 @@ defmodule Flagon.App do
   end
 
   def handle_event({:key, :f5}, state), do: run_query(state)
-  def handle_event({:key, :enter, [:ctrl]}, state), do: run_query(state)
 
   def handle_event({:key, :r, [:ctrl]}, state) do
     case state.query_target do
@@ -100,7 +99,7 @@ defmodule Flagon.App do
     conn_type = connection_type_for(state.query_target, state)
     node = %{type: :table, metadata: meta}
     query = Flagon.Schema.default_query_for(node, conn_type, state.page_size)
-    {:ok, %{state | query_text: query}}
+    run_query(%{state | query_text: query})
   end
 
   def handle_event(:schema_node_selected, _data, state), do: {:noreply, state}
@@ -194,13 +193,15 @@ defmodule Flagon.App do
           ],
           orientation: :vertical,
           ratio: 0.35,
-          id: :query_results_split
+          id: :query_results_split,
+          resize_mode: :live
         )
       ],
       orientation: :horizontal,
       ratio: 0.24,
       id: :main_split,
-      flex: 1
+      flex: 1,
+      resize_mode: :live
     )
   end
 
@@ -245,23 +246,26 @@ defmodule Flagon.App do
   end
 
   defp render_query_panel(state) do
-    vertical([
-      text_area(
-        id: :query_editor,
-        bind: :query_text,
-        placeholder: query_placeholder(state),
-        show_line_numbers: true,
-        flex: 1
-      ),
-      render_toolbar(state)
-    ])
+    vertical(
+      [
+        text_area(
+          id: :query_editor,
+          bind: :query_text,
+          placeholder: query_placeholder(state),
+          show_line_numbers: true,
+          height: :auto
+        ),
+        render_toolbar(state)
+      ],
+      flex: 1
+    )
   end
 
   defp render_toolbar(state) do
     horizontal(
       [
         button(
-          if(state.executing?, do: "Running...", else: "Run (F5)"),
+          if(state.executing?, do: "Running...", else: "Run"),
           on_click: :run_query,
           compact: true,
           style: %{bold: true}
@@ -295,28 +299,22 @@ defmodule Flagon.App do
     {dt_columns, dt_data, total_pages} =
       Flagon.Query.Result.to_data_table_format(result, state.result_page, state.page_size)
 
-    table_tab =
-      vertical([
+    vertical(
+      [
+        render_pagination(state.result_page, total_pages, result.row_count, result.execution_time_ms),
         data_table(
           id: :results_table,
           columns: dt_columns,
           data: dt_data,
+          height: :auto,
           zebra_stripes: true,
-          flex: 1
-        ),
-        render_pagination(state.result_page, total_pages, result.row_count, result.execution_time_ms)
-      ])
-
-    raw_tab =
-      scrollable(
-        [pretty(result.rows, id: :raw_results)],
-        flex: 1
-      )
-
-    tabbed_content([
-      {"Table (#{result.row_count} rows)", table_tab},
-      {"Raw", raw_tab}
-    ])
+          show_header: true,
+          show_scrollbars: true,
+          column_fit_mode: :fit
+        )
+      ],
+      flex: 1
+    )
   end
 
   defp render_pagination(page, total_pages, row_count, elapsed_ms) do

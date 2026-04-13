@@ -28,6 +28,7 @@ defmodule Flagon.MixProject do
       {:toml, "~> 0.7"},
       {:nimble_csv, "~> 1.2"},
       {:elixlsx, "~> 0.6"},
+      {:jason, "~> 1.4"},
       {:kino, "~> 0.14", optional: true}
     ]
   end

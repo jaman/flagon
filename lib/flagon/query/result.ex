@@ -108,7 +108,9 @@ defmodule Flagon.Query.Result do
     end)
 
     dt_data = Enum.map(paged_rows, fn row ->
-      Enum.zip(col_keys, row) |> Map.new()
+      Enum.zip(col_keys, row)
+      |> Enum.map(fn {k, v} -> {k, displayable(v)} end)
+      |> Map.new()
     end)
 
     {dt_columns, dt_data, total_pages}
@@ -125,6 +127,30 @@ defmodule Flagon.Query.Result do
 
     "#{header}\n#{data}"
   end
+
+  defp displayable(nil), do: ""
+  defp displayable(v) when is_binary(v) do
+    if String.valid?(v) do
+      v
+    else
+      case v do
+        <<a::32, b::16, c::16, d::16, e::48>> ->
+          :io_lib.format("~8.16.0b-~4.16.0b-~4.16.0b-~4.16.0b-~12.16.0b", [a, b, c, d, e])
+          |> IO.iodata_to_binary()
+
+        _ ->
+          Base.encode16(v, case: :lower)
+      end
+    end
+  end
+  defp displayable(%DateTime{} = dt), do: Calendar.strftime(dt, "%Y-%m-%d %H:%M:%S")
+  defp displayable(%NaiveDateTime{} = dt), do: Calendar.strftime(dt, "%Y-%m-%d %H:%M:%S")
+  defp displayable(%Date{} = d), do: Date.to_string(d)
+  defp displayable(%Time{} = t), do: Time.to_string(t)
+  defp displayable(v) when is_atom(v), do: Atom.to_string(v)
+  defp displayable(v) when is_number(v), do: v
+  defp displayable(v) when is_boolean(v), do: v
+  defp displayable(v), do: inspect(v)
 
   defp infer_type(nil), do: :unknown
   defp infer_type(v) when is_integer(v), do: :integer
