@@ -120,7 +120,13 @@ defmodule Flagon.Connection.EctoAdapter do
   end
 
   defp start_repo(repo_module, name, repo_opts) do
-    case repo_module.start_link(repo_opts) do
+    child_spec = %{
+      id: repo_module,
+      start: {repo_module, :start_link, [repo_opts]},
+      type: :supervisor
+    }
+
+    case Supervisor.start_child(Flagon.Supervisor, child_spec) do
       {:ok, _pid} ->
         :ets.insert(@registry, {name, repo_module})
         {:ok, repo_module}

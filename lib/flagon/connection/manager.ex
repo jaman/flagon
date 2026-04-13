@@ -37,6 +37,20 @@ defmodule Flagon.Connection.Manager do
         {:ok, conn}
 
       {:connect, adapter, config} ->
+        result = isolated_connect(adapter, config)
+        GenServer.call(__MODULE__, {:store_connect_result, name, result})
+        result
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  defp isolated_connect(adapter, config) do
+    caller = self()
+
+    {pid, ref} =
+      spawn_monitor(fn ->
         result =
           try do
             adapter.connect(config)
@@ -46,11 +60,21 @@ defmodule Flagon.Connection.Manager do
             :exit, reason -> {:error, reason}
           end
 
-        GenServer.call(__MODULE__, {:store_connect_result, name, result})
+        send(caller, {:connect_result, self(), result})
+      end)
+
+    receive do
+      {:connect_result, ^pid, result} ->
+        Process.demonitor(ref, [:flush])
         result
 
-      {:error, _} = error ->
-        error
+      {:DOWN, ^ref, :process, ^pid, reason} ->
+        {:error, reason}
+    after
+      10_000 ->
+        Process.demonitor(ref, [:flush])
+        Process.exit(pid, :kill)
+        {:error, :connect_timeout}
     end
   end
 
@@ -340,20 +364,41 @@ defmodule Flagon.Connection.Manager do
 
   defp with_active_connection(state, fun) do
     case state.active do
-      nil -> {:error, :no_active_connection}
+      nil ->
+        {:error, :no_active_connection}
+
       name ->
         case Map.get(state.connections, name) do
           %{status: :connected} = conn_state ->
-            try do
-              fun.(conn_state)
-            rescue
-              error -> {:error, Exception.message(error)}
-            catch
-              :exit, reason -> {:error, reason}
-            end
+            safe_call(fn -> fun.(conn_state) end)
 
-          _ -> {:error, :not_connected}
+          _ ->
+            {:error, :not_connected}
         end
+    end
+  end
+
+  defp safe_call(fun) do
+    caller = self()
+
+    {pid, ref} =
+      spawn_monitor(fn ->
+        result = fun.()
+        send(caller, {:safe_call_result, self(), result})
+      end)
+
+    receive do
+      {:safe_call_result, ^pid, result} ->
+        Process.demonitor(ref, [:flush])
+        result
+
+      {:DOWN, ^ref, :process, ^pid, reason} ->
+        {:error, reason}
+    after
+      60_000 ->
+        Process.demonitor(ref, [:flush])
+        Process.exit(pid, :kill)
+        {:error, :timeout}
     end
   end
 end
