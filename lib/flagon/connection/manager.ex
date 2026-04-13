@@ -37,36 +37,20 @@ defmodule Flagon.Connection.Manager do
         {:ok, conn}
 
       {:connect, adapter, config} ->
-        result = safe_connect(adapter, config)
+        result =
+          try do
+            adapter.connect(config)
+          rescue
+            error -> {:error, Exception.message(error)}
+          catch
+            :exit, reason -> {:error, reason}
+          end
+
         GenServer.call(__MODULE__, {:store_connect_result, name, result})
         result
 
       {:error, _} = error ->
         error
-    end
-  end
-
-  defp safe_connect(adapter, config) do
-    caller = self()
-
-    {pid, ref} =
-      spawn_monitor(fn ->
-        result = adapter.connect(config)
-        send(caller, {:connect_result, self(), result})
-      end)
-
-    receive do
-      {:connect_result, ^pid, result} ->
-        Process.demonitor(ref, [:flush])
-        result
-
-      {:DOWN, ^ref, :process, ^pid, reason} ->
-        {:error, reason}
-    after
-      10_000 ->
-        Process.demonitor(ref, [:flush])
-        Process.exit(pid, :kill)
-        {:error, :connect_timeout}
     end
   end
 
