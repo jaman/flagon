@@ -63,9 +63,19 @@ defmodule Flagon.Connection.Manager do
     GenServer.call(__MODULE__, :introspect, 30_000)
   end
 
+  @spec introspect_connection(String.t()) :: {:ok, [Flagon.Schema.schema_node()]} | {:error, term()}
+  def introspect_connection(name) do
+    GenServer.call(__MODULE__, {:introspect_connection, to_string(name)}, 30_000)
+  end
+
   @spec refresh_schema() :: {:ok, [Flagon.Schema.schema_node()]} | {:error, term()}
   def refresh_schema do
     GenServer.call(__MODULE__, :refresh_schema, 30_000)
+  end
+
+  @spec refresh_schema_for(String.t()) :: {:ok, [Flagon.Schema.schema_node()]} | {:error, term()}
+  def refresh_schema_for(name) do
+    GenServer.call(__MODULE__, {:refresh_schema_for, to_string(name)}, 30_000)
   end
 
   @spec list_connections() :: [{String.t(), connection_state()}]
@@ -229,6 +239,56 @@ defmodule Flagon.Connection.Manager do
           error ->
             {:reply, error, state}
         end
+    end
+  end
+
+  @impl true
+  def handle_call({:introspect_connection, name}, _from, state) do
+    case Map.get(state.connections, name) do
+      nil ->
+        {:reply, {:error, :unknown_connection}, state}
+
+      %{status: :connected} = conn_state ->
+        case conn_state.schema_cache do
+          nil ->
+            case conn_state.adapter.introspect(conn_state.conn) do
+              {:ok, schema} ->
+                updated = %{conn_state | schema_cache: schema}
+                connections = Map.put(state.connections, name, updated)
+                {:reply, {:ok, schema}, %{state | connections: connections}}
+
+              error ->
+                {:reply, error, state}
+            end
+
+          cached ->
+            {:reply, {:ok, cached}, state}
+        end
+
+      _ ->
+        {:reply, {:error, :not_connected}, state}
+    end
+  end
+
+  @impl true
+  def handle_call({:refresh_schema_for, name}, _from, state) do
+    case Map.get(state.connections, name) do
+      nil ->
+        {:reply, {:error, :unknown_connection}, state}
+
+      %{status: :connected} = conn_state ->
+        case conn_state.adapter.introspect(conn_state.conn) do
+          {:ok, schema} ->
+            updated = %{conn_state | schema_cache: schema}
+            connections = Map.put(state.connections, name, updated)
+            {:reply, {:ok, schema}, %{state | connections: connections}}
+
+          error ->
+            {:reply, error, state}
+        end
+
+      _ ->
+        {:reply, {:error, :not_connected}, state}
     end
   end
 

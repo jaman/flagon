@@ -1,16 +1,16 @@
 defmodule Flagon.Query.History do
   @moduledoc """
-  Persisted query history ring buffer.
+  Persisted query history backed by DETS.
   """
 
   use GenServer
 
   @max_entries 500
-  @history_file Path.expand("~/.config/flagon/history.dat")
-
-  defstruct entries: [], max: @max_entries
+  @table_name :flagon_history
+  @history_dir Path.expand("~/.config/flagon")
 
   @type entry :: %{
+          id: non_neg_integer(),
           query: String.t(),
           timestamp: DateTime.t(),
           execution_time_ms: non_neg_integer(),
@@ -44,14 +44,26 @@ defmodule Flagon.Query.History do
   end
 
   @impl true
-  def init(_opts) do
-    entries = load_from_disk()
-    {:ok, %__MODULE__{entries: entries}}
+  def init(opts) do
+    dir = Keyword.get(opts, :dir, @history_dir)
+    File.mkdir_p!(dir)
+    path = Path.join(dir, "history.dets") |> String.to_charlist()
+
+    {:ok, @table_name} =
+      :dets.open_file(@table_name, [
+        {:file, path},
+        {:type, :set},
+        {:auto_save, 60_000}
+      ])
+
+    next_id = compute_next_id()
+    {:ok, %{next_id: next_id}}
   end
 
   @impl true
   def handle_cast({:add, query, execution_time_ms, row_count, connection}, state) do
     entry = %{
+      id: state.next_id,
       query: query,
       timestamp: DateTime.utc_now(),
       execution_time_ms: execution_time_ms,
@@ -59,51 +71,79 @@ defmodule Flagon.Query.History do
       connection: connection
     }
 
-    entries = [entry | state.entries] |> Enum.take(state.max)
-    persist(entries)
-    {:noreply, %{state | entries: entries}}
+    :dets.insert(@table_name, {state.next_id, entry})
+    prune(state.next_id)
+    {:noreply, %{state | next_id: state.next_id + 1}}
   end
 
   @impl true
-  def handle_cast(:clear, state) do
-    persist([])
-    {:noreply, %{state | entries: []}}
+  def handle_cast(:clear, _state) do
+    :dets.delete_all_objects(@table_name)
+    {:noreply, %{next_id: 0}}
   end
 
   @impl true
   def handle_call(:list, _from, state) do
-    {:reply, state.entries, state}
+    entries =
+      :dets.foldl(
+        fn {_id, entry}, acc -> [entry | acc] end,
+        [],
+        @table_name
+      )
+      |> Enum.sort_by(& &1.id, :desc)
+
+    {:reply, entries, state}
   end
 
   @impl true
   def handle_call({:search, term}, _from, state) do
     downcased = String.downcase(term)
 
-    results =
-      Enum.filter(state.entries, fn entry ->
-        String.contains?(String.downcase(entry.query), downcased)
-      end)
+    entries =
+      :dets.foldl(
+        fn {_id, entry}, acc ->
+          if String.contains?(String.downcase(entry.query), downcased) do
+            [entry | acc]
+          else
+            acc
+          end
+        end,
+        [],
+        @table_name
+      )
+      |> Enum.sort_by(& &1.id, :desc)
 
-    {:reply, results, state}
+    {:reply, entries, state}
   end
 
-  defp load_from_disk do
-    case File.read(@history_file) do
-      {:ok, binary} ->
-        try do
-          :erlang.binary_to_term(binary)
-        rescue
-          _ -> []
+  @impl true
+  def terminate(_reason, _state) do
+    :dets.close(@table_name)
+  end
+
+  defp compute_next_id do
+    :dets.foldl(
+      fn {id, _entry}, max_id -> max(id, max_id) end,
+      -1,
+      @table_name
+    ) + 1
+  end
+
+  defp prune(current_id) when current_id >= @max_entries do
+    cutoff = current_id - @max_entries
+
+    :dets.foldl(
+      fn {id, _entry}, acc ->
+        if id <= cutoff do
+          :dets.delete(@table_name, id)
         end
 
-      {:error, _} ->
-        []
-    end
+        acc
+      end,
+      :ok,
+      @table_name
+    )
   end
 
-  defp persist(entries) do
-    dir = Path.dirname(@history_file)
-    File.mkdir_p!(dir)
-    File.write!(@history_file, :erlang.term_to_binary(entries))
-  end
+  defp prune(_current_id), do: :ok
 end
