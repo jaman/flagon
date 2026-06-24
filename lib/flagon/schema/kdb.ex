@@ -5,8 +5,18 @@ defmodule Flagon.Schema.Kdb do
 
   @spec introspect(pid() | atom()) :: {:ok, [Flagon.Schema.schema_node()]} | {:error, term()}
   def introspect(conn) do
-    with {:ok, namespaces} <- ExeQute.namespaces(conn) do
-      nodes = Enum.map(namespaces, fn ns ->
+    clear_cache(conn)
+
+    user_namespaces =
+      case ExeQute.namespaces(conn) do
+        {:ok, ns} -> ns
+        _ -> []
+      end
+
+    all_namespaces = ["."] ++ Enum.reject(user_namespaces, &(&1 == "."))
+
+    nodes =
+      Enum.map(all_namespaces, fn ns ->
         %{
           id: {:ns, ns},
           label: ns,
@@ -16,8 +26,15 @@ defmodule Flagon.Schema.Kdb do
         }
       end)
 
-      {:ok, nodes}
-    end
+    {:ok, nodes}
+  end
+
+  defp clear_cache(conn) do
+    ExeQute.Connection.clear_cache(conn)
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
   end
 
   @spec load_namespace_children(pid() | atom(), String.t()) :: [Flagon.Schema.schema_node()]
@@ -30,7 +47,9 @@ defmodule Flagon.Schema.Kdb do
   end
 
   defp load_tables(conn, namespace) do
-    case safe_call(fn -> ExeQute.tables(conn, namespace) end) do
+    ns_arg = if namespace == ".", do: nil, else: namespace
+
+    case safe_call(fn -> ExeQute.tables(conn, ns_arg) end) do
       {:ok, table_names} when is_list(table_names) ->
         Enum.map(table_names, fn name ->
           %{
@@ -69,7 +88,9 @@ defmodule Flagon.Schema.Kdb do
   end
 
   defp load_functions(conn, namespace) do
-    case safe_call(fn -> ExeQute.functions(conn, namespace) end) do
+    ns_arg = if namespace == ".", do: nil, else: namespace
+
+    case safe_call(fn -> ExeQute.functions(conn, ns_arg) end) do
       {:ok, funcs} when is_list(funcs) ->
         Enum.map(funcs, fn func ->
           name = Map.get(func, "name", "?")
@@ -96,7 +117,9 @@ defmodule Flagon.Schema.Kdb do
   end
 
   defp load_variables(conn, namespace) do
-    case safe_call(fn -> ExeQute.variables(conn, namespace) end) do
+    ns_arg = if namespace == ".", do: nil, else: namespace
+
+    case safe_call(fn -> ExeQute.variables(conn, ns_arg) end) do
       {:ok, vars} when is_list(vars) ->
         Enum.map(vars, fn name ->
           %{

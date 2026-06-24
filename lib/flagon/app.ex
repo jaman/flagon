@@ -33,10 +33,14 @@ defmodule Flagon.App do
       query_text: load_editor(first_name),
       result: nil,
       result_page: 1,
+      result_tab: :result,
+      chart_type: "line",
       page_size: config.page_size,
       executing?: false,
       error: nil,
-      query_task: nil
+      query_task: nil,
+      history_selected: 0,
+      preview: nil
     }
   end
 
@@ -63,38 +67,40 @@ defmodule Flagon.App do
     ])
   end
 
-  def keybindings do
-    [
-      {"F5", "Run"},
-      {"Ctrl+R", "Refresh"},
-      {"Ctrl+S", "Export CSV"},
-      {"Ctrl+Y", "Copy"},
-      {"Ctrl+Q", "Quit"}
-    ]
+  keybinding :f5, "Run" do
+    run_query(state)
   end
 
-  def handle_event({:key, :f5}, state), do: run_query(state)
+  keybinding :f6, "Run Line" do
+    query_text = Flagon.App.QueryText.extract(:query_editor, :selection)
+    run_query(%{state | query_text: query_text})
+  end
 
-  def handle_event({:key, :r, [:ctrl]}, state) do
+  keybinding :f8, "Settings" do
+    props = %{
+      page_size: state.page_size,
+      query_timeout_ms: state.config.query_timeout_ms,
+      theme: state.config.theme
+    }
+
+    {:show_modal, Flagon.App.SettingsDialog, props, [title: "Settings", width: 50, height: 18]}
+  end
+
+  keybinding {:r, [:ctrl]}, "Refresh" do
     case state.query_target do
       nil -> {:noreply, state}
       name -> do_refresh_schema(name, state)
     end
   end
 
-  def handle_event({:key, :escape}, %{executing?: true} = state) do
-    if state.query_task, do: Task.shutdown(state.query_task, :brutal_kill)
-    {:ok, %{state | executing?: false, query_task: nil}}
-  end
-
-  def handle_event({:key, :s, [:ctrl]}, state) do
+  keybinding {:s, [:ctrl]}, "Export CSV" do
     case state.result do
       nil -> {:noreply, state}
       result -> export_csv(result, state)
     end
   end
 
-  def handle_event({:key, :y, [:ctrl]}, state) do
+  keybinding {:y, [:ctrl]}, "Copy" do
     case state.result do
       nil -> {:noreply, state}
       result ->
@@ -105,7 +111,14 @@ defmodule Flagon.App do
     end
   end
 
-  def handle_event({:key, :q, [:ctrl]}, _state), do: {:stop, :normal}
+  keybinding {:q, [:ctrl]}, "Quit" do
+    {:stop, :normal}
+  end
+
+  def handle_event({:key, :escape}, %{executing?: true} = state) do
+    if state.query_task, do: Task.shutdown(state.query_task, :brutal_kill)
+    {:ok, %{state | executing?: false, query_task: nil}}
+  end
 
   def handle_event(_event, state), do: {:noreply, state}
 
@@ -126,6 +139,35 @@ defmodule Flagon.App do
     run_query(%{state | query_text: query})
   end
 
+  def handle_event(:schema_node_selected, [%{id: {:func, _, _}, metadata: meta} | _], state) do
+    name = Map.get(meta, :function, "?")
+    params = Map.get(meta, :params, [])
+    body = Map.get(meta, :body, "")
+
+    preview = %{
+      type: :function,
+      name: name,
+      signature: "#{name}[#{Enum.join(params, ";")}]",
+      params: params,
+      body: body
+    }
+
+    {:ok, %{state | preview: preview, result_tab: :result, error: nil}}
+  end
+
+  def handle_event(:schema_node_selected, [%{id: {:var, _, _}, metadata: meta} | _], state) do
+    name = Map.get(meta, :variable, "?")
+    namespace = Map.get(meta, :namespace, ".")
+
+    preview = %{
+      type: :variable,
+      name: name,
+      namespace: namespace
+    }
+
+    {:ok, %{state | preview: preview, result_tab: :result, error: nil}}
+  end
+
   def handle_event(:schema_node_selected, _data, state), do: {:noreply, state}
 
   def handle_event(:next_page, _data, state) do
@@ -143,22 +185,59 @@ defmodule Flagon.App do
     end
   end
 
-  def handle_event(:quick_select_top, _data, state), do: {:noreply, state}
-  def handle_event(:quick_count, _data, state), do: {:noreply, state}
+  def handle_event(:tab_result, _data, state), do: {:ok, %{state | result_tab: :result}}
+  def handle_event(:tab_chart, _data, state), do: {:ok, %{state | result_tab: :chart}}
+  def handle_event(:tab_history, _data, state), do: {:ok, %{state | result_tab: :history}}
+
+  def handle_event(:chart_type_selected, %{id: type}, state), do: {:ok, %{state | chart_type: type}}
+  def handle_event(:chart_type_selected, type, state) when is_binary(type), do: {:ok, %{state | chart_type: type}}
+
+  def handle_event(:history_select, %{id: idx}, state) when is_integer(idx) do
+    {:ok, %{state | history_selected: idx}}
+  end
+
+  def handle_event(:history_select, idx, state) when is_integer(idx) do
+    {:ok, %{state | history_selected: idx}}
+  end
+
+  def handle_event(:history_load, _data, state) do
+    load_history_entry(state.history_selected, state)
+  end
+
+  def handle_event(:clear_history, _data, state) do
+    Flagon.Query.History.clear()
+    {:ok, state}
+  end
+
+  def handle_event(:show_connections, _data, state) do
+    {:show_modal, Flagon.App.ConnectionDialog, %{connections: state.connections},
+     [title: "Connections", width: 60, height: 20]}
+  end
+
+  def handle_event(:connection_result, {:updated, connections}, state) do
+    conn_names = Enum.map(connections, fn c -> {to_string(c.name), to_string(c.name)} end)
+    Flagon.Connection.Manager.load_connections(connections)
+    {:ok, %{state | connections: connections, conn_names: conn_names}}
+  end
+
+  def handle_event(:connection_result, _data, state), do: {:noreply, state}
+
+  def handle_event(:settings_result, {:saved, settings}, state) do
+    config = %{state.config | page_size: settings.page_size, query_timeout_ms: settings.query_timeout_ms, theme: settings.theme}
+    {:ok, %{state | config: config, page_size: settings.page_size}}
+  end
+
+  def handle_event(:settings_result, _data, state), do: {:noreply, state}
 
   def handle_event(_event, _data, state), do: {:noreply, state}
 
   def on_message({:query_complete, {:ok, result}}, state) do
     if state.query_target do
-      Flagon.Query.History.add(
-        state.query_text,
-        result.execution_time_ms,
-        result.row_count,
-        state.query_target
-      )
+      Flagon.Query.History.add(state.query_text, result, state.query_target)
+      refresh_schema_async(state.query_target)
     end
 
-    %{state | result: result, executing?: false, result_page: 1, error: nil, query_task: nil}
+    %{state | result: result, executing?: false, result_page: 1, result_tab: :result, error: nil, query_task: nil}
   end
 
   def on_message({:query_complete, {:error, reason}}, state) do
@@ -235,17 +314,24 @@ defmodule Flagon.App do
   end
 
   defp render_left_panel(state) do
-    vertical([
-      label("Servers", style: %{bold: true}),
-      option_list(
-        state.conn_names,
-        id: :conn_list,
-        on_select: :connection_selected,
-        height: max(3, length(state.conn_names) + 1)
-      ),
-      label("", height: 1),
-      render_schema_tree(state)
-    ])
+    split_pane(
+      [
+        vertical([
+          label("Servers", style: %{bold: true}),
+          option_list(
+            state.conn_names,
+            id: :conn_list,
+            on_select: :connection_selected,
+            height: :auto
+          )
+        ]),
+        render_schema_tree(state)
+      ],
+      orientation: :vertical,
+      ratio: 0.3,
+      id: :left_split,
+      resize_mode: :live
+    )
   end
 
   defp render_schema_tree(state) do
@@ -282,6 +368,8 @@ defmodule Flagon.App do
           bind: :query_text,
           placeholder: query_placeholder(state),
           show_line_numbers: true,
+          language: editor_language(state),
+          trap_focus: :arrows,
           height: :auto
         ),
         render_toolbar(state)
@@ -307,6 +395,19 @@ defmodule Flagon.App do
   end
 
   defp render_results_panel(state) do
+    vertical(
+      [
+        box(
+          [render_result_content(state)],
+          flex: 1
+        ),
+        render_result_tab_bar(state)
+      ],
+      flex: 1
+    )
+  end
+
+  defp render_result_content(state) do
     cond do
       state.error ->
         vertical([
@@ -314,15 +415,42 @@ defmodule Flagon.App do
           label(state.error)
         ])
 
-      state.result == nil ->
-        label("No results. Press F5 to run a query.", style: %{dim: true})
+      state.result_tab == :history ->
+        render_history_view(state)
+
+      state.result_tab == :chart and state.result != nil ->
+        render_chart_view(state)
+
+      state.preview != nil and state.result_tab == :result ->
+        render_preview(state.preview)
+
+      state.result != nil ->
+        render_result_table(state)
 
       true ->
-        render_result_tabs(state)
+        label("No results. Press F5 to run a query.", style: %{dim: true})
     end
   end
 
-  defp render_result_tabs(state) do
+  @tab_active %{bold: true, fg: {255, 255, 255}, bg: {60, 60, 120}}
+  @tab_inactive %{dim: true}
+
+  defp render_result_tab_bar(state) do
+    horizontal(
+      [
+        button("📋 Result", on_click: :tab_result, compact: true,
+          style: if(state.result_tab == :result, do: @tab_active, else: @tab_inactive)),
+        button("📊 Chart", on_click: :tab_chart, compact: true,
+          style: if(state.result_tab == :chart, do: @tab_active, else: @tab_inactive)),
+        button("🕓 History", on_click: :tab_history, compact: true,
+          style: if(state.result_tab == :history, do: @tab_active, else: @tab_inactive))
+      ],
+      gap: 0,
+      height: 1
+    )
+  end
+
+  defp render_result_table(state) do
     result = state.result
 
     {dt_columns, dt_data, total_pages} =
@@ -333,6 +461,167 @@ defmodule Flagon.App do
         render_pagination(state.result_page, total_pages, result.row_count, result.execution_time_ms),
         data_table(
           id: :results_table,
+          columns: dt_columns,
+          data: dt_data,
+          height: :auto,
+          zebra_stripes: true,
+          show_header: true,
+          show_scrollbars: true,
+          column_fit_mode: :expand,
+          cursor_type: :cell
+        )
+      ],
+      flex: 1
+    )
+  end
+
+  @preview_label_style %{fg: {180, 180, 180}, dim: true}
+  @preview_value_style %{fg: {255, 255, 255}}
+  @preview_body_style %{fg: {130, 200, 255}}
+
+  defp render_preview(%{type: :function} = preview) do
+    body_lines =
+      preview.body
+      |> String.split("\n")
+      |> Enum.map(fn line -> label(line, style: @preview_body_style) end)
+
+    vertical(
+      [
+        label("Function: #{preview.signature}", style: %{bold: true, fg: {255, 255, 255}}),
+        label(""),
+        horizontal([
+          label("Parameters: ", style: @preview_label_style),
+          label(Enum.join(preview.params, ", "), style: @preview_value_style)
+        ]),
+        label(""),
+        label("Definition:", style: @preview_label_style),
+        label("")
+      ] ++ body_lines,
+      flex: 1
+    )
+  end
+
+  defp render_preview(%{type: :variable} = preview) do
+    qualified =
+      case preview.namespace do
+        "." -> preview.name
+        ns -> "#{ns}.#{preview.name}"
+      end
+
+    vertical([
+      label("Variable: #{qualified}", style: %{bold: true, fg: {255, 255, 255}})
+    ])
+  end
+
+  @chart_types [
+    {"line", "line"},
+    {"area", "area"},
+    {"bar", "bar"},
+    {"stacked_bar", "stacked_bar"},
+    {"scatter", "scatter"},
+    {"candlestick", "candlestick"},
+    {"histogram", "histogram"},
+    {"step", "step"},
+    {"bubble", "bubble"},
+    {"heatmap", "heatmap"}
+  ]
+
+  defp render_chart_view(state) do
+    if Flagon.App.ChartView.chartable?(state.result) do
+      chart_type_atom = String.to_existing_atom(state.chart_type)
+      {chart_data, chart_opts} = Flagon.App.ChartView.auto_chart_data(state.result)
+      chart_opts = Keyword.put(chart_opts, :type, chart_type_atom)
+
+      split_pane(
+        [
+          render_chart_controls(state),
+          vertical(
+            [
+              label(
+                "#{state.result.row_count} rows  #{state.result.execution_time_ms}ms",
+                style: %{dim: true},
+                height: 1
+              ),
+              chart(chart_data, chart_opts)
+            ],
+            flex: 1
+          )
+        ],
+        orientation: :horizontal,
+        ratio: 0.2,
+        id: :chart_split
+      )
+    else
+      label("No numeric columns to chart.", style: %{dim: true})
+    end
+  end
+
+  defp render_chart_controls(_state) do
+    vertical([
+      label("Type:", style: %{bold: true}, height: 1),
+      option_list(
+        @chart_types,
+        id: :chart_type_select,
+        on_select: :chart_type_selected,
+        height: :auto
+      )
+    ])
+  end
+
+  defp render_history_view(state) do
+    entries = Flagon.Query.History.list()
+
+    if entries == [] do
+      label("No query history yet.", style: %{dim: true})
+    else
+      items =
+        entries
+        |> Enum.with_index()
+        |> Enum.map(fn {entry, idx} ->
+          query = entry.query |> String.replace(~r/\s+/, " ") |> String.trim()
+          {"#{query}", idx}
+        end)
+
+      selected_entry = Enum.at(entries, state.history_selected)
+
+      split_pane(
+        [
+          vertical([
+            label("Query", style: %{bold: true}, height: 1),
+            option_list(
+              items,
+              id: :history_list,
+              on_select: :history_select,
+              height: :auto
+            ),
+            button("Clear", on_click: :clear_history, compact: true, height: 1)
+          ]),
+          render_history_result(selected_entry)
+        ],
+        orientation: :horizontal,
+        ratio: 0.3,
+        id: :history_split
+      )
+    end
+  end
+
+  defp render_history_result(nil), do: label("Select a query", style: %{dim: true})
+
+  defp render_history_result(%{result: nil}), do: label("No result data", style: %{dim: true})
+
+  defp render_history_result(entry) do
+    result = entry.result
+
+    {dt_columns, dt_data, _total_pages} =
+      Flagon.Query.Result.to_data_table_format(result, 1, 1000)
+
+    info = "#{entry.connection}  #{result.row_count} rows  #{result.execution_time_ms}ms"
+
+    vertical(
+      [
+        label(info, style: %{dim: true}, height: 1),
+        data_table(
+          id: :history_results_table,
           columns: dt_columns,
           data: dt_data,
           height: :auto,
@@ -359,6 +648,15 @@ defmodule Flagon.App do
       gap: 1,
       height: 1
     )
+  end
+
+  defp load_history_entry(idx, state) do
+    entries = Flagon.Query.History.list()
+
+    case Enum.at(entries, idx) do
+      nil -> {:noreply, state}
+      entry -> {:ok, %{state | query_text: entry.query, result_tab: :result}}
+    end
   end
 
   defp switch_connection(name, state) do
@@ -403,6 +701,7 @@ defmodule Flagon.App do
 
   defp run_query(state) do
     query_text = String.trim(state.query_text || "")
+    state = %{state | preview: nil}
 
     cond do
       query_text == "" ->
@@ -477,6 +776,17 @@ defmodule Flagon.App do
     %{state | conn_statuses: statuses}
   end
 
+  defp refresh_schema_async(name) do
+    caller = self()
+
+    Task.start(fn ->
+      case Flagon.Connection.Manager.refresh_schema_for(name) do
+        {:ok, tree} -> send(caller, {:schema_loaded, name, {:ok, tree}})
+        _ -> :ok
+      end
+    end)
+  end
+
   defp do_refresh_schema(name, state) do
     caller = self()
 
@@ -488,6 +798,15 @@ defmodule Flagon.App do
     end)
 
     {:ok, state}
+  end
+
+  defp editor_language(state) do
+    case connection_type_for(state.query_target, state) do
+      :kdb -> :kdb
+      :postgres -> :sql
+      :duckdb -> :sql
+      _ -> nil
+    end
   end
 
   defp query_placeholder(state) do

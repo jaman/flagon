@@ -5,7 +5,7 @@ defmodule Flagon.Query.History do
 
   use GenServer
 
-  @max_entries 500
+  @max_entries 100
   @table_name :flagon_history
   @history_dir Path.expand("~/.config/flagon")
 
@@ -15,7 +15,8 @@ defmodule Flagon.Query.History do
           timestamp: DateTime.t(),
           execution_time_ms: non_neg_integer(),
           row_count: non_neg_integer(),
-          connection: String.t()
+          connection: String.t(),
+          result: Flagon.Query.Result.t() | nil
         }
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -23,9 +24,9 @@ defmodule Flagon.Query.History do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
-  @spec add(String.t(), non_neg_integer(), non_neg_integer(), String.t()) :: :ok
-  def add(query, execution_time_ms, row_count, connection) do
-    GenServer.cast(__MODULE__, {:add, query, execution_time_ms, row_count, connection})
+  @spec add(String.t(), Flagon.Query.Result.t(), String.t()) :: :ok
+  def add(query, result, connection) do
+    GenServer.cast(__MODULE__, {:add, query, result, connection})
   end
 
   @spec list() :: [entry()]
@@ -33,9 +34,9 @@ defmodule Flagon.Query.History do
     GenServer.call(__MODULE__, :list)
   end
 
-  @spec search(String.t()) :: [entry()]
-  def search(term) do
-    GenServer.call(__MODULE__, {:search, term})
+  @spec get(non_neg_integer()) :: entry() | nil
+  def get(id) do
+    GenServer.call(__MODULE__, {:get, id})
   end
 
   @spec clear() :: :ok
@@ -61,14 +62,15 @@ defmodule Flagon.Query.History do
   end
 
   @impl true
-  def handle_cast({:add, query, execution_time_ms, row_count, connection}, state) do
+  def handle_cast({:add, query, result, connection}, state) do
     entry = %{
       id: state.next_id,
       query: query,
       timestamp: DateTime.utc_now(),
-      execution_time_ms: execution_time_ms,
-      row_count: row_count,
-      connection: connection
+      execution_time_ms: result.execution_time_ms,
+      row_count: result.row_count,
+      connection: connection,
+      result: result
     }
 
     :dets.insert(@table_name, {state.next_id, entry})
@@ -96,24 +98,14 @@ defmodule Flagon.Query.History do
   end
 
   @impl true
-  def handle_call({:search, term}, _from, state) do
-    downcased = String.downcase(term)
+  def handle_call({:get, id}, _from, state) do
+    result =
+      case :dets.lookup(@table_name, id) do
+        [{^id, entry}] -> entry
+        _ -> nil
+      end
 
-    entries =
-      :dets.foldl(
-        fn {_id, entry}, acc ->
-          if String.contains?(String.downcase(entry.query), downcased) do
-            [entry | acc]
-          else
-            acc
-          end
-        end,
-        [],
-        @table_name
-      )
-      |> Enum.sort_by(& &1.id, :desc)
-
-    {:reply, entries, state}
+    {:reply, result, state}
   end
 
   @impl true
@@ -134,10 +126,7 @@ defmodule Flagon.Query.History do
 
     :dets.foldl(
       fn {id, _entry}, acc ->
-        if id <= cutoff do
-          :dets.delete(@table_name, id)
-        end
-
+        if id <= cutoff, do: :dets.delete(@table_name, id)
         acc
       end,
       :ok,

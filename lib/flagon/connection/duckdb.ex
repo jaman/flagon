@@ -19,6 +19,7 @@ defmodule Flagon.Connection.DuckDB do
 
     with {:ok, db} <- db_result,
          {:ok, conn} <- Duckdbex.connection(db) do
+      load_extensions(conn)
       name = to_string(config.name)
       register(name, %{db: db, conn: conn, path: path})
       {:ok, conn}
@@ -64,6 +65,15 @@ defmodule Flagon.Connection.DuckDB do
   @impl true
   def stream_query(_conn, _query_string, _opts) do
     {:error, :not_yet_implemented}
+  end
+
+  @auto_extensions ["parquet", "json", "httpfs"]
+
+  defp load_extensions(conn) do
+    Enum.each(@auto_extensions, fn ext ->
+      Duckdbex.query(conn, "INSTALL '#{ext}'")
+      Duckdbex.query(conn, "LOAD '#{ext}'")
+    end)
   end
 
   defp build_result(columns, rows, elapsed) do
