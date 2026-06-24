@@ -20,8 +20,8 @@ defmodule Flagon.MixProject do
 
   defp deps do
     [
-      {:drafter, path: "../tui/drafter"},
-      {:exe_qute, path: "../kdb/exe_qute"},
+      {:drafter, github: "jaman/drafter"},
+      {:exe_qute, "~> 0.1.2"},
       {:ecto_sql, "~> 3.10"},
       {:postgrex, "~> 0.17"},
       {:duckdbex, "~> 0.3"},
