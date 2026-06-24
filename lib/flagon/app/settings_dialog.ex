@@ -1,12 +1,17 @@
 defmodule Flagon.App.SettingsDialog do
   use Drafter.Screen
 
-  @theme_options [
-    {"dark", "dark"},
-    {"light", "light"},
-    {"solarized", "solarized"},
-    {"monokai", "monokai"}
-  ]
+  @doc """
+  Theme choices for the settings list, derived from the themes Drafter actually
+  supports so the configured default is always selectable.
+  """
+  @spec theme_options() :: [{String.t(), String.t()}]
+  def theme_options do
+    Drafter.Theme.available_themes()
+    |> Map.keys()
+    |> Enum.sort()
+    |> Enum.map(fn name -> {name, name} end)
+  end
 
   def mount(props) do
     %{
@@ -19,7 +24,8 @@ defmodule Flagon.App.SettingsDialog do
   end
 
   def render(state) do
-    theme_count = length(@theme_options) + 1
+    options = theme_options()
+    theme_count = length(options) + 1
 
     vertical([
       label("Settings", style: %{bold: true}),
@@ -33,7 +39,7 @@ defmodule Flagon.App.SettingsDialog do
         height: 1
       ),
       horizontal(
-        [label("Theme:", width: 20), option_list(@theme_options, id: :theme_select, on_select: :theme_selected, height: theme_count)],
+        [label("Theme:", width: 20), option_list(options, id: :theme_select, on_select: :theme_selected, height: theme_count)],
         height: theme_count
       ),
       label(""),

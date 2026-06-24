@@ -3,9 +3,7 @@ defmodule Flagon.Config do
   Configuration loader with precedence: CLI args > .exs > .toml > defaults.
   """
 
-  @config_dir Path.expand("~/.config/flagon")
-  @exs_path Path.join(@config_dir, "config.exs")
-  @toml_path Path.join(@config_dir, "config.toml")
+  @default_config_dir Path.expand("~/.config/flagon")
 
   @defaults %{
     page_size: 1000,
@@ -17,10 +15,12 @@ defmodule Flagon.Config do
   @type connection_config :: %{
           name: String.t(),
           type: :kdb | :postgres | :duckdb,
+          folder: String.t() | nil,
           host: String.t() | nil,
           port: non_neg_integer() | nil,
           username: String.t() | nil,
           password: String.t() | nil,
+          tls: boolean() | nil,
           dsn: String.t() | nil,
           path: String.t() | nil
         }
@@ -35,16 +35,57 @@ defmodule Flagon.Config do
   @spec load(keyword()) :: t()
   def load(cli_opts \\ []) do
     file_config = load_file()
-    merge(file_config, cli_opts)
+
+    file_config
+    |> merge(cli_opts)
+    |> merge_server_list(cli_opts)
+  end
+
+  @spec load_server_list(String.t()) :: [connection_config()]
+  def load_server_list(path) do
+    expanded = Path.expand(path)
+
+    case File.read(expanded) do
+      {:ok, content} -> parse_server_list(expanded, content)
+      {:error, _reason} -> []
+    end
   end
 
   @spec config_dir() :: String.t()
-  def config_dir, do: @config_dir
+  def config_dir, do: Application.get_env(:flagon, :config_dir) || @default_config_dir
+
+  @doc """
+  The unique, folder-qualified identity of a connection: `folder/name`, or the
+  bare `name` when the connection has no folder.
+  """
+  @spec qualified_name(connection_config() | map()) :: String.t()
+  def qualified_name(%{folder: folder, name: name}) when is_binary(folder) and folder != "" do
+    folder <> "/" <> to_string(name)
+  end
+
+  def qualified_name(%{name: name}), do: to_string(name)
+
+  @spec save(t(), keyword()) :: :ok | {:error, term()}
+  def save(config, opts \\ []) do
+    dir = Keyword.get(opts, :dir, config_dir())
+    File.mkdir_p!(dir)
+    persistable = Map.take(config, [:page_size, :query_timeout_ms, :theme, :connections])
+    exs_path = Path.join(dir, "config.exs")
+
+    if File.exists?(exs_path) do
+      File.write(exs_path, inspect(persistable, pretty: true, limit: :infinity))
+    else
+      File.write(Path.join(dir, "config.toml"), Flagon.Config.Toml.encode(persistable))
+    end
+  end
 
   defp load_file do
+    exs_path = Path.join(config_dir(), "config.exs")
+    toml_path = Path.join(config_dir(), "config.toml")
+
     cond do
-      File.exists?(@exs_path) -> Flagon.Config.Exs.load(@exs_path)
-      File.exists?(@toml_path) -> Flagon.Config.Toml.load(@toml_path)
+      File.exists?(exs_path) -> Flagon.Config.Exs.load(exs_path)
+      File.exists?(toml_path) -> Flagon.Config.Toml.load(toml_path)
       true -> {:ok, %{}}
     end
     |> case do
@@ -59,6 +100,26 @@ defmodule Flagon.Config do
     @defaults
     |> Map.merge(normalize(file_config))
     |> Map.merge(normalize(cli_map))
+  end
+
+  defp merge_server_list(config, cli_opts) do
+    path = cli_opts[:servers] || Map.get(config, :server_list)
+
+    case path && load_server_list(path) do
+      servers when is_list(servers) and servers != [] ->
+        %{config | connections: config.connections ++ servers}
+
+      _ ->
+        config
+    end
+  end
+
+  defp parse_server_list(path, content) do
+    if String.ends_with?(path, ".json") do
+      Flagon.Config.ServerList.parse_json(content)
+    else
+      Flagon.Config.ServerList.parse_text(content)
+    end
   end
 
   defp cli_to_map(opts) do
@@ -78,7 +139,7 @@ defmodule Flagon.Config do
   defp normalize(config) when is_map(config) do
     config
     |> normalize_connections()
-    |> Map.take([:page_size, :query_timeout_ms, :theme, :connections])
+    |> Map.take([:page_size, :query_timeout_ms, :theme, :connections, :server_list])
     |> Enum.reject(fn {_k, v} -> is_nil(v) end)
     |> Map.new()
   end

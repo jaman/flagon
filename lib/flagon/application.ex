@@ -7,6 +7,7 @@ defmodule Flagon.Application do
   def start(_type, _args) do
     children = [
       Flagon.Connection.Manager,
+      {Cachex, [name: :flagon_history]},
       Flagon.Query.History
     ]
 

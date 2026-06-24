@@ -6,7 +6,7 @@ defmodule Flagon do
   @spec start(keyword()) :: :ok | {:error, term()}
   def start(opts \\ []) do
     config = Flagon.Config.load(opts)
-    Process.put(:flagon_config, config)
+    Application.put_env(:flagon, :loaded_config, config)
     Drafter.run(Flagon.App, title: "Flagon")
   end
 end

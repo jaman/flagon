@@ -142,7 +142,7 @@ defmodule Flagon.Connection.Manager do
   def handle_call({:load_connections, configs}, _from, state) do
     connections =
       Map.new(configs, fn config ->
-        name = to_string(config.name)
+        name = Flagon.Config.qualified_name(config)
         adapter = Flagon.Connection.adapter_for(config.type)
 
         {name,

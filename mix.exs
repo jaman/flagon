@@ -26,6 +26,7 @@ defmodule Flagon.MixProject do
       {:postgrex, "~> 0.17"},
       {:duckdbex, "~> 0.3"},
       {:toml, "~> 0.7"},
+      {:cachex, "~> 4.0"},
       {:nimble_csv, "~> 1.2"},
       {:elixlsx, "~> 0.6"},
       {:jason, "~> 1.4"},

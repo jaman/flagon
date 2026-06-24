@@ -7,17 +7,25 @@ defmodule Flagon.App do
 
   @editor_table :flagon_editor_state
 
-  def mount(_props) do
-    config = Process.get(:flagon_config, Flagon.Config.load())
+  @key_hints [
+    {"F4", "Connections"},
+    {"F5", "Run All"},
+    {"F6", "Run Line"},
+    {"F9", "Run Selection"},
+    {"F7", "History"},
+    {"F8", "Settings"},
+    {"Ctrl+R", "Refresh"},
+    {"Ctrl+S", "Export"},
+    {"Ctrl+Y", "Copy"},
+    {"Ctrl+Q", "Quit"}
+  ]
 
-    conn_names =
-      Enum.map(config.connections, fn c ->
-        {to_string(c.name), to_string(c.name)}
-      end)
+  def mount(_props) do
+    config = Application.get_env(:flagon, :loaded_config) || Flagon.Config.load()
 
     first_name =
       case config.connections do
-        [first | _] -> to_string(first.name)
+        [first | _] -> Flagon.Config.qualified_name(first)
         [] -> nil
       end
 
@@ -26,7 +34,6 @@ defmodule Flagon.App do
     %{
       config: config,
       connections: config.connections,
-      conn_names: conn_names,
       conn_schemas: %{},
       conn_statuses: %{},
       query_target: first_name,
@@ -40,7 +47,8 @@ defmodule Flagon.App do
       error: nil,
       query_task: nil,
       history_selected: 0,
-      preview: nil
+      preview: nil,
+      executed_query: nil
     }
   end
 
@@ -49,7 +57,7 @@ defmodule Flagon.App do
 
     statuses =
       Map.new(state.connections, fn c ->
-        {to_string(c.name), :disconnected}
+        {Flagon.Config.qualified_name(c), :disconnected}
       end)
 
     state = %{state | conn_statuses: statuses}
@@ -63,17 +71,29 @@ defmodule Flagon.App do
     vertical([
       render_header(state),
       render_main(state),
-      footer()
+      footer(bindings: @key_hints)
     ])
   end
 
-  keybinding :f5, "Run" do
-    run_query(state)
+  keybinding :f5, "Run All" do
+    run_query(state, Flagon.App.QueryText.extract(:query_editor, :all))
   end
 
   keybinding :f6, "Run Line" do
-    query_text = Flagon.App.QueryText.extract(:query_editor, :selection)
-    run_query(%{state | query_text: query_text})
+    run_query(state, Flagon.App.QueryText.extract(:query_editor, :line))
+  end
+
+  keybinding :f9, "Run Selection" do
+    run_query(state, Flagon.App.QueryText.extract(:query_editor, :selection))
+  end
+
+  keybinding :f4, "Connections" do
+    {:show_modal, Flagon.App.ConnectionDialog, %{connections: state.connections},
+     [title: "Connections", width: 60, height: 20]}
+  end
+
+  keybinding :f7, "History" do
+    {:show_modal, Flagon.App.HistoryDialog, %{}, [title: "Query History", width: 70, height: 20]}
   end
 
   keybinding :f8, "Settings" do
@@ -122,12 +142,12 @@ defmodule Flagon.App do
 
   def handle_event(_event, state), do: {:noreply, state}
 
-  def handle_event(:connection_selected, conn_name, state) when is_binary(conn_name) do
-    switch_connection(conn_name, state)
+  def handle_event(:connection_selected, [%{id: {:server, id}} | _], state) do
+    switch_connection(id, state)
   end
 
-  def handle_event(:connection_selected, %{id: conn_name}, state) do
-    switch_connection(to_string(conn_name), state)
+  def handle_event(:connection_selected, [%{id: {:folder, _path}} | _], state) do
+    {:noreply, state}
   end
 
   def handle_event(:run_query, _data, state), do: run_query(state)
@@ -209,21 +229,27 @@ defmodule Flagon.App do
     {:ok, state}
   end
 
+  def handle_event(:history_result, {:use_query, query}, state) do
+    {:ok, %{state | query_text: query, result_tab: :result}}
+  end
+
   def handle_event(:show_connections, _data, state) do
     {:show_modal, Flagon.App.ConnectionDialog, %{connections: state.connections},
      [title: "Connections", width: 60, height: 20]}
   end
 
   def handle_event(:connection_result, {:updated, connections}, state) do
-    conn_names = Enum.map(connections, fn c -> {to_string(c.name), to_string(c.name)} end)
+    config = %{state.config | connections: connections}
+    Flagon.Config.save(config)
     Flagon.Connection.Manager.load_connections(connections)
-    {:ok, %{state | connections: connections, conn_names: conn_names}}
+    {:ok, reconcile_connections(state, config, connections)}
   end
 
   def handle_event(:connection_result, _data, state), do: {:noreply, state}
 
   def handle_event(:settings_result, {:saved, settings}, state) do
     config = %{state.config | page_size: settings.page_size, query_timeout_ms: settings.query_timeout_ms, theme: settings.theme}
+    Flagon.Config.save(config)
     {:ok, %{state | config: config, page_size: settings.page_size}}
   end
 
@@ -233,7 +259,7 @@ defmodule Flagon.App do
 
   def on_message({:query_complete, {:ok, result}}, state) do
     if state.query_target do
-      Flagon.Query.History.add(state.query_text, result, state.query_target)
+      Flagon.Query.History.add(state.executed_query || state.query_text, result, state.query_target)
       refresh_schema_async(state.query_target)
     end
 
@@ -318,11 +344,12 @@ defmodule Flagon.App do
       [
         vertical([
           label("Servers", style: %{bold: true}),
-          option_list(
-            state.conn_names,
-            id: :conn_list,
+          tree(
+            id: :conn_tree,
+            data: Flagon.App.ConnectionTree.build(state.connections, state.conn_statuses),
+            selection_mode: :single,
             on_select: :connection_selected,
-            height: :auto
+            flex: 1
           )
         ]),
         render_schema_tree(state)
@@ -529,8 +556,7 @@ defmodule Flagon.App do
   defp render_chart_view(state) do
     if Flagon.App.ChartView.chartable?(state.result) do
       chart_type_atom = String.to_existing_atom(state.chart_type)
-      {chart_data, chart_opts} = Flagon.App.ChartView.auto_chart_data(state.result)
-      chart_opts = Keyword.put(chart_opts, :type, chart_type_atom)
+      {chart_data, chart_opts} = Flagon.App.ChartView.auto_chart_data(state.result, chart_type_atom)
 
       split_pane(
         [
@@ -699,8 +725,8 @@ defmodule Flagon.App do
     {:ok, %{state | conn_statuses: statuses}}
   end
 
-  defp run_query(state) do
-    query_text = String.trim(state.query_text || "")
+  defp run_query(state, override \\ nil) do
+    query_text = String.trim(override || state.query_text || "")
     state = %{state | preview: nil}
 
     cond do
@@ -741,7 +767,7 @@ defmodule Flagon.App do
             end
           end)
 
-        {:ok, %{state | executing?: true, error: nil, query_task: task}}
+        {:ok, %{state | executing?: true, error: nil, query_task: task, executed_query: query_text}}
     end
   end
 
@@ -753,8 +779,22 @@ defmodule Flagon.App do
     :exit, reason -> {:error, {:exit, inspect(reason)}}
   end
 
+  defp reconcile_connections(state, config, connections) do
+    ids = Enum.map(connections, &Flagon.Config.qualified_name/1)
+    statuses = Map.new(ids, fn id -> {id, Map.get(state.conn_statuses, id, :disconnected)} end)
+    target = if state.query_target in ids, do: state.query_target, else: List.first(ids)
+
+    added =
+      Enum.reject(connections, fn conn ->
+        Map.has_key?(state.conn_statuses, Flagon.Config.qualified_name(conn))
+      end)
+
+    base = %{state | config: config, connections: connections, conn_statuses: statuses, query_target: target}
+    Enum.reduce(added, base, &start_connect/2)
+  end
+
   defp start_connect(conn_config, state) do
-    name = to_string(conn_config.name)
+    name = Flagon.Config.qualified_name(conn_config)
     caller = self()
     statuses = Map.put(state.conn_statuses, name, :connecting)
 
@@ -821,7 +861,7 @@ defmodule Flagon.App do
   defp connection_type_for(nil, _state), do: nil
 
   defp connection_type_for(name, state) do
-    case Enum.find(state.connections, &(to_string(&1.name) == name)) do
+    case Enum.find(state.connections, &(Flagon.Config.qualified_name(&1) == name)) do
       %{type: type} -> type
       _ -> nil
     end

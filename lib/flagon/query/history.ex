@@ -1,13 +1,17 @@
 defmodule Flagon.Query.History do
   @moduledoc """
-  Persisted query history backed by DETS.
+  Persisted query history backed by a Cachex cache with on-disk snapshots.
+
+  Entries are keyed by an incrementing id and capped at the most recent
+  `#{100}`. The cache is snapshotted to `history.cachex` under the config dir
+  after every mutation and restored on boot, so history survives restarts
+  without DETS's repair-on-dirty-shutdown behaviour.
   """
 
   use GenServer
 
   @max_entries 100
-  @table_name :flagon_history
-  @history_dir Path.expand("~/.config/flagon")
+  @cache :flagon_history
 
   @type entry :: %{
           id: non_neg_integer(),
@@ -45,20 +49,9 @@ defmodule Flagon.Query.History do
   end
 
   @impl true
-  def init(opts) do
-    dir = Keyword.get(opts, :dir, @history_dir)
-    File.mkdir_p!(dir)
-    path = Path.join(dir, "history.dets") |> String.to_charlist()
-
-    {:ok, @table_name} =
-      :dets.open_file(@table_name, [
-        {:file, path},
-        {:type, :set},
-        {:auto_save, 60_000}
-      ])
-
-    next_id = compute_next_id()
-    {:ok, %{next_id: next_id}}
+  def init(_opts) do
+    restore()
+    {:ok, %{next_id: compute_next_id()}}
   end
 
   @impl true
@@ -73,66 +66,74 @@ defmodule Flagon.Query.History do
       result: result
     }
 
-    :dets.insert(@table_name, {state.next_id, entry})
+    Cachex.put(@cache, state.next_id, entry)
     prune(state.next_id)
+    persist()
     {:noreply, %{state | next_id: state.next_id + 1}}
   end
 
   @impl true
   def handle_cast(:clear, _state) do
-    :dets.delete_all_objects(@table_name)
+    Cachex.clear(@cache)
+    persist()
     {:noreply, %{next_id: 0}}
   end
 
   @impl true
   def handle_call(:list, _from, state) do
-    entries =
-      :dets.foldl(
-        fn {_id, entry}, acc -> [entry | acc] end,
-        [],
-        @table_name
-      )
-      |> Enum.sort_by(& &1.id, :desc)
-
-    {:reply, entries, state}
+    {:reply, Enum.sort_by(all_entries(), & &1.id, :desc), state}
   end
 
   @impl true
   def handle_call({:get, id}, _from, state) do
-    result =
-      case :dets.lookup(@table_name, id) do
-        [{^id, entry}] -> entry
-        _ -> nil
-      end
-
-    {:reply, result, state}
+    {:reply, fetch(id), state}
   end
 
-  @impl true
-  def terminate(_reason, _state) do
-    :dets.close(@table_name)
+  defp fetch(id) do
+    case Cachex.get(@cache, id) do
+      {:ok, nil} -> nil
+      {:ok, entry} -> entry
+      _ -> nil
+    end
+  end
+
+  defp all_entries do
+    case Cachex.keys(@cache) do
+      {:ok, keys} -> keys |> Enum.map(&fetch/1) |> Enum.reject(&is_nil/1)
+      _ -> []
+    end
   end
 
   defp compute_next_id do
-    :dets.foldl(
-      fn {id, _entry}, max_id -> max(id, max_id) end,
-      -1,
-      @table_name
-    ) + 1
+    case Cachex.keys(@cache) do
+      {:ok, [_ | _] = keys} -> Enum.max(keys) + 1
+      _ -> 0
+    end
   end
 
   defp prune(current_id) when current_id >= @max_entries do
     cutoff = current_id - @max_entries
 
-    :dets.foldl(
-      fn {id, _entry}, acc ->
-        if id <= cutoff, do: :dets.delete(@table_name, id)
-        acc
-      end,
-      :ok,
-      @table_name
-    )
+    case Cachex.keys(@cache) do
+      {:ok, keys} -> Enum.each(keys, fn id -> if id <= cutoff, do: Cachex.del(@cache, id) end)
+      _ -> :ok
+    end
   end
 
   defp prune(_current_id), do: :ok
+
+  defp persist do
+    path = persist_path()
+    File.mkdir_p!(Path.dirname(path))
+    Cachex.save(@cache, path)
+  end
+
+  defp restore do
+    path = persist_path()
+    if File.exists?(path), do: Cachex.restore(@cache, path)
+  end
+
+  defp persist_path do
+    Path.join(Flagon.Config.config_dir(), "history.cachex")
+  end
 end
