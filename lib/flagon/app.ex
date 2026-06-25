@@ -753,7 +753,6 @@ defmodule Flagon.App do
 
   defp run_query(state, override \\ nil) do
     query_text = String.trim(override || state.query_text || "")
-    _ = File.write(Path.join(Flagon.Config.config_dir(), "last_query.txt"), inspect(query_text, limit: :infinity))
     state = %{state | preview: nil}
 
     cond do
