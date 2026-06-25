@@ -56,7 +56,7 @@ defmodule Flagon.Schema.Kdb do
             id: {:table, namespace, name},
             label: name,
             type: :table,
-            children: load_columns(conn, qualified_name(namespace, name)),
+            children: :lazy,
             metadata: %{namespace: namespace, table: name}
           }
         end)
@@ -64,6 +64,11 @@ defmodule Flagon.Schema.Kdb do
       _ ->
         []
     end
+  end
+
+  @spec columns(pid() | atom(), String.t(), String.t()) :: [Flagon.Schema.schema_node()]
+  def columns(conn, namespace, table) do
+    load_columns(conn, qualified_name(namespace, table))
   end
 
   defp load_columns(conn, table_name) do

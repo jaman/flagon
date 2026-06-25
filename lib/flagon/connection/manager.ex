@@ -123,6 +123,12 @@ defmodule Flagon.Connection.Manager do
     GenServer.call(__MODULE__, {:refresh_schema_for, to_string(name)}, 30_000)
   end
 
+  @spec load_columns(String.t(), String.t(), String.t()) ::
+          {:ok, [Flagon.Schema.schema_node()]} | {:error, term()}
+  def load_columns(name, namespace, table) do
+    GenServer.call(__MODULE__, {:load_columns, to_string(name), namespace, table}, 30_000)
+  end
+
   @spec list_connections() :: [{String.t(), connection_state()}]
   def list_connections do
     GenServer.call(__MODULE__, :list_connections)
@@ -340,6 +346,22 @@ defmodule Flagon.Connection.Manager do
           error ->
             {:reply, error, state}
         end
+
+      _ ->
+        {:reply, {:error, :not_connected}, state}
+    end
+  end
+
+  @impl true
+  def handle_call({:load_columns, name, namespace, table}, _from, state) do
+    case Map.get(state.connections, name) do
+      %{status: :connected, conn: conn, adapter: adapter} ->
+        columns =
+          if function_exported?(adapter, :load_columns, 3),
+            do: adapter.load_columns(conn, namespace, table),
+            else: []
+
+        {:reply, {:ok, columns}, state}
 
       _ ->
         {:reply, {:error, :not_connected}, state}

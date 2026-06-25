@@ -18,6 +18,26 @@ defmodule Flagon.Schema do
     Enum.map(nodes, &convert_node/1)
   end
 
+  @doc """
+  Replaces the `children` of the node identified by `id` anywhere in a nested
+  node list, leaving the rest untouched. Used to fill in a lazily-loaded node's
+  children after they are fetched.
+  """
+  @spec put_node_children([schema_node()], term(), [schema_node()]) :: [schema_node()]
+  def put_node_children(nodes, id, children) when is_list(nodes) do
+    Enum.map(nodes, &put_in_node(&1, id, children))
+  end
+
+  defp put_in_node(%{id: node_id} = node, id, children) when node_id == id do
+    %{node | children: children}
+  end
+
+  defp put_in_node(%{children: kids} = node, id, children) when is_list(kids) do
+    %{node | children: Enum.map(kids, &put_in_node(&1, id, children))}
+  end
+
+  defp put_in_node(node, _id, _children), do: node
+
   @spec connection_node(String.t(), atom(), :connected | :disconnected | :connecting | :error, [schema_node()]) :: schema_node()
   def connection_node(name, type, status, children) do
     status_indicator =
@@ -72,7 +92,7 @@ defmodule Flagon.Schema do
       id: node.id,
       label: node.label,
       icon: icon_for(node),
-      children: [],
+      children: [%{id: {:lazy, node.id}, label: "…", icon: " ", children: [], metadata: %{}}],
       metadata: Map.get(node, :metadata, %{})
     }
   end

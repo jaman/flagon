@@ -20,4 +20,9 @@ defmodule Flagon.Connection.ManagerTest do
     assert :ok = Manager.switch("A/RDB")
     assert {:error, :unknown_connection} = Manager.switch("missing")
   end
+
+  test "load_columns/3 errors when the connection is not connected (no eager crawl)" do
+    Manager.load_connections([%{folder: "A", name: "RDB", type: :kdb, host: "h", port: 1}])
+    assert {:error, :not_connected} = Manager.load_columns("A/RDB", ".", "trade")
+  end
 end

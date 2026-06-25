@@ -196,6 +196,13 @@ defmodule Flagon.App do
 
   def handle_event(:schema_node_selected, _data, state), do: {:noreply, state}
 
+  def handle_event(:schema_node_expanded, {%{id: {:table, namespace, table}}, true}, state) do
+    load_columns_async(state.query_target, namespace, table)
+    {:noreply, state}
+  end
+
+  def handle_event(:schema_node_expanded, _data, state), do: {:noreply, state}
+
   def handle_event(:next_page, _data, state) do
     {:ok, %{state | result_page: state.result_page + 1}}
   end
@@ -299,6 +306,17 @@ defmodule Flagon.App do
     %{state | error: "Schema #{name}: #{inspect(reason)}"}
   end
 
+  def on_message({:columns_loaded, target, node_id, columns}, state) do
+    case Map.get(state.conn_schemas, target) do
+      nil ->
+        state
+
+      schema ->
+        updated = Flagon.Schema.put_node_children(schema, node_id, columns)
+        %{state | conn_schemas: Map.put(state.conn_schemas, target, updated)}
+    end
+  end
+
   def on_message(_msg, state), do: state
 
   defp render_header(state) do
@@ -387,6 +405,7 @@ defmodule Flagon.App do
         data: Flagon.Schema.to_tree_data(schema_data),
         selection_mode: :single,
         on_select: :schema_node_selected,
+        on_expand: :schema_node_expanded,
         flex: 1
       )
     end
@@ -734,6 +753,7 @@ defmodule Flagon.App do
 
   defp run_query(state, override \\ nil) do
     query_text = String.trim(override || state.query_text || "")
+    _ = File.write(Path.join(Flagon.Config.config_dir(), "last_query.txt"), inspect(query_text, limit: :infinity))
     state = %{state | preview: nil}
 
     cond do
@@ -845,6 +865,21 @@ defmodule Flagon.App do
     end)
 
     %{state | conn_statuses: statuses}
+  end
+
+  defp load_columns_async(nil, _namespace, _table), do: :ok
+
+  defp load_columns_async(target, namespace, table) do
+    caller = self()
+
+    Task.start(fn ->
+      case Flagon.Connection.Manager.load_columns(target, namespace, table) do
+        {:ok, columns} -> send(caller, {:columns_loaded, target, {:table, namespace, table}, columns})
+        _ -> :ok
+      end
+    end)
+
+    :ok
   end
 
   defp do_refresh_schema(name, state) do

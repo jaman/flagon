@@ -66,6 +66,11 @@ defmodule Flagon.Connection.Kdb do
   end
 
   @impl true
+  def load_columns(conn, namespace, table) do
+    Flagon.Schema.Kdb.columns(conn, namespace, table)
+  end
+
+  @impl true
   def stream_query(_conn, _query_string, _opts) do
     {:error, :not_supported}
   end

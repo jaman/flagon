@@ -14,6 +14,9 @@ defmodule Flagon.Connection do
   @callback introspect(conn()) :: {:ok, schema_tree()} | {:error, term()}
   @callback stream_query(conn(), query :: String.t(), opts :: keyword()) ::
               {:ok, Enumerable.t()} | {:error, term()}
+  @callback load_columns(conn(), namespace :: String.t(), table :: String.t()) :: schema_tree()
+
+  @optional_callbacks load_columns: 3
 
   @spec adapter_for(atom()) :: module()
   def adapter_for(:kdb), do: Flagon.Connection.Kdb
