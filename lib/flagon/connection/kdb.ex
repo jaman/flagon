@@ -72,7 +72,7 @@ defmodule Flagon.Connection.Kdb do
 
   defp maybe_add(opts, key, config) do
     case Map.get(config, key) do
-      nil -> opts
+      blank when blank in [nil, ""] -> opts
       value -> Keyword.put(opts, key, value)
     end
   end
