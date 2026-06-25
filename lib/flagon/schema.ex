@@ -51,7 +51,7 @@ defmodule Flagon.Schema do
       :kdb ->
         ns = Map.get(meta, :namespace, "")
         table = Map.get(meta, :table, "")
-        "select from #{qualified_kdb_name(ns, table)}"
+        "#{page_size}#select from #{qualified_kdb_name(ns, table)}"
 
       type when type in [:postgres, :duckdb] ->
         schema = Map.get(meta, :schema, "public")

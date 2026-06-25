@@ -43,12 +43,16 @@ defmodule Flagon.Config do
 
   @spec load_server_list(String.t()) :: [connection_config()]
   def load_server_list(path) do
-    expanded = Path.expand(path)
+    expanded = resolve_path(path)
 
     case File.read(expanded) do
       {:ok, content} -> parse_server_list(expanded, content)
       {:error, _reason} -> []
     end
+  end
+
+  defp resolve_path(path) do
+    if Path.type(path) == :absolute, do: path, else: Path.expand(path, config_dir())
   end
 
   @spec config_dir() :: String.t()
@@ -103,7 +107,7 @@ defmodule Flagon.Config do
   end
 
   defp merge_server_list(config, cli_opts) do
-    path = cli_opts[:servers] || Map.get(config, :server_list)
+    path = cli_opts[:servers] || Map.get(config, :server_list) || discovered_server_list()
 
     case path && load_server_list(path) do
       servers when is_list(servers) and servers != [] ->
@@ -112,6 +116,12 @@ defmodule Flagon.Config do
       _ ->
         config
     end
+  end
+
+  defp discovered_server_list do
+    ["servers.json", "servers.txt"]
+    |> Enum.map(&Path.join(config_dir(), &1))
+    |> Enum.find(&File.exists?/1)
   end
 
   defp parse_server_list(path, content) do

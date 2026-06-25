@@ -11,9 +11,9 @@ defmodule Flagon.App do
     {"F4", "Connections"},
     {"F5", "Run All"},
     {"F6", "Run Line"},
-    {"F9", "Run Selection"},
-    {"F7", "History"},
-    {"F8", "Settings"},
+    {"F7", "Run Selection"},
+    {"F8", "History"},
+    {"F9", "Settings"},
     {"Ctrl+R", "Refresh"},
     {"Ctrl+S", "Export"},
     {"Ctrl+Y", "Copy"},
@@ -76,15 +76,15 @@ defmodule Flagon.App do
   end
 
   keybinding :f5, "Run All" do
-    run_query(state, Flagon.App.QueryText.extract(:query_editor, :all))
+    run_query(state)
   end
 
   keybinding :f6, "Run Line" do
-    run_query(state, Flagon.App.QueryText.extract(:query_editor, :line))
+    run_extracted(:line, state)
   end
 
-  keybinding :f9, "Run Selection" do
-    run_query(state, Flagon.App.QueryText.extract(:query_editor, :selection))
+  keybinding :f7, "Run Selection" do
+    run_extracted(:selection, state)
   end
 
   keybinding :f4, "Connections" do
@@ -92,11 +92,11 @@ defmodule Flagon.App do
      [title: "Connections", width: 60, height: 20]}
   end
 
-  keybinding :f7, "History" do
+  keybinding :f8, "History" do
     {:show_modal, Flagon.App.HistoryDialog, %{}, [title: "Query History", width: 70, height: 20]}
   end
 
-  keybinding :f8, "Settings" do
+  keybinding :f9, "Settings" do
     props = %{
       page_size: state.page_size,
       query_timeout_ms: state.config.query_timeout_ms,
@@ -151,6 +151,12 @@ defmodule Flagon.App do
   end
 
   def handle_event(:run_query, _data, state), do: run_query(state)
+
+  def handle_event(:run_line, _data, state), do: run_extracted(:line, state)
+
+  def handle_event(:run_selection, _data, state), do: run_extracted(:selection, state)
+
+  def handle_event(:run_text, text, state), do: run_query(state, text)
 
   def handle_event(:schema_node_selected, [%{id: {:table, _, _}, metadata: meta} | _], state) do
     conn_type = connection_type_for(state.query_target, state)
@@ -260,7 +266,6 @@ defmodule Flagon.App do
   def on_message({:query_complete, {:ok, result}}, state) do
     if state.query_target do
       Flagon.Query.History.add(state.executed_query || state.query_text, result, state.query_target)
-      refresh_schema_async(state.query_target)
     end
 
     %{state | result: result, executing?: false, result_page: 1, result_tab: :result, error: nil, query_task: nil}
@@ -409,11 +414,13 @@ defmodule Flagon.App do
     horizontal(
       [
         button(
-          if(state.executing?, do: "Running...", else: "Run"),
+          if(state.executing?, do: "Running...", else: "Run All"),
           on_click: :run_query,
           compact: true,
           style: %{bold: true}
         ),
+        button("Run Line", on_click: :run_line, compact: true),
+        button("Run Sel", on_click: :run_selection, compact: true),
         button("Refresh", on_click: :refresh_schema, compact: true)
       ],
       gap: 1,
@@ -750,24 +757,48 @@ defmodule Flagon.App do
               {:ok, _} ->
                 send(caller, {:query_complete, result})
 
-              {:error, _} ->
-                send(caller, {:query_reconnecting, target})
-                Flagon.Connection.Manager.disconnect(target)
+              {:error, :timeout} ->
+                send(caller, {:query_complete, {:error, :timeout}})
 
-                case Flagon.Connection.Manager.connect(target) do
-                  {:ok, _} ->
-                    send(caller, {:connected, target})
-                    Flagon.Connection.Manager.switch(target)
-                    retry = safe_execute(query_text, timeout)
-                    send(caller, {:query_complete, retry})
-
-                  {:error, reason} ->
-                    send(caller, {:connect_failed, target, reason})
-                end
+              {:error, _reason} ->
+                reconnect_and_retry(caller, target, query_text, timeout)
             end
           end)
 
-        {:ok, %{state | executing?: true, error: nil, query_task: task, executed_query: query_text}}
+        {:ok,
+         %{
+           state
+           | executing?: true,
+             error: nil,
+             result: nil,
+             result_tab: :result,
+             query_task: task,
+             executed_query: query_text
+         }}
+    end
+  end
+
+  defp run_extracted(mode, state) do
+    Task.start(fn ->
+      text = Flagon.App.QueryText.extract(:query_editor, mode)
+      Drafter.send_app_event(:run_text, text)
+    end)
+
+    {:noreply, state}
+  end
+
+  defp reconnect_and_retry(caller, target, query_text, timeout) do
+    send(caller, {:query_reconnecting, target})
+    Flagon.Connection.Manager.disconnect(target)
+
+    case Flagon.Connection.Manager.connect(target) do
+      {:ok, _} ->
+        send(caller, {:connected, target})
+        Flagon.Connection.Manager.switch(target)
+        send(caller, {:query_complete, safe_execute(query_text, timeout)})
+
+      {:error, reason} ->
+        send(caller, {:connect_failed, target, reason})
     end
   end
 
@@ -814,17 +845,6 @@ defmodule Flagon.App do
     end)
 
     %{state | conn_statuses: statuses}
-  end
-
-  defp refresh_schema_async(name) do
-    caller = self()
-
-    Task.start(fn ->
-      case Flagon.Connection.Manager.refresh_schema_for(name) do
-        {:ok, tree} -> send(caller, {:schema_loaded, name, {:ok, tree}})
-        _ -> :ok
-      end
-    end)
   end
 
   defp do_refresh_schema(name, state) do

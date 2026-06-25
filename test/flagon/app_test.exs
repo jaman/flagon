@@ -39,6 +39,25 @@ defmodule Flagon.AppTest do
     end
   end
 
+  describe "handle_event/3 :run_query" do
+    @tag :tmp_dir
+    test "clears the previous result, marks executing, and records the executed query" do
+      Flagon.Connection.Manager.load_connections([%{name: "k", type: :kdb, host: "h", port: 1}])
+
+      state = %{
+        Flagon.App.mount(%{})
+        | query_target: "k",
+          query_text: "select 1",
+          result: %Flagon.Query.Result{row_count: 5}
+      }
+
+      assert {:ok, new} = Flagon.App.handle_event(:run_query, nil, state)
+      assert new.result == nil
+      assert new.executing? == true
+      assert new.executed_query == "select 1"
+    end
+  end
+
   describe "handle_event/3 :connection_result" do
     @tag :tmp_dir
     test "persists connections to disk and updates state", %{tmp_dir: tmp} do
