@@ -60,11 +60,7 @@ defmodule Flagon.App do
         {Flagon.Config.qualified_name(c), :disconnected}
       end)
 
-    state = %{state | conn_statuses: statuses}
-
-    Enum.reduce(state.connections, state, fn conn_config, acc ->
-      start_connect(conn_config, acc)
-    end)
+    %{state | conn_statuses: statuses}
   end
 
   def render(state) do
@@ -80,6 +76,10 @@ defmodule Flagon.App do
   end
 
   keybinding :f6, "Run Line" do
+    run_extracted(:line, state)
+  end
+
+  keybinding {:enter, [:ctrl]}, "Run Line" do
     run_extracted(:line, state)
   end
 

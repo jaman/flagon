@@ -7,7 +7,23 @@ defmodule Flagon.MixProject do
       version: "0.1.0",
       elixir: "~> 1.18",
       start_permanent: Mix.env() == :prod,
+      releases: releases(),
       deps: deps()
+    ]
+  end
+
+  defp releases do
+    [
+      flagon: [
+        steps: [:assemble, &Burrito.wrap/1],
+        burrito: [
+          targets: [
+            macos_arm: [os: :darwin, cpu: :aarch64],
+            macos_x86: [os: :darwin, cpu: :x86_64],
+            linux_x86: [os: :linux, cpu: :x86_64]
+          ]
+        ]
+      ]
     ]
   end
 
@@ -27,6 +43,7 @@ defmodule Flagon.MixProject do
       {:duckdbex, "~> 0.3"},
       {:toml, "~> 0.7"},
       {:cachex, "~> 4.0"},
+      {:burrito, "~> 1.0"},
       {:nimble_csv, "~> 1.2"},
       {:elixlsx, "~> 0.6"},
       {:jason, "~> 1.4"},

@@ -12,6 +12,12 @@ defmodule Flagon.Application do
     ]
 
     opts = [strategy: :one_for_one, name: Flagon.Supervisor]
-    Supervisor.start_link(children, opts)
+    result = Supervisor.start_link(children, opts)
+
+    if Application.get_env(:flagon, :autostart, false) do
+      spawn(&Flagon.start/0)
+    end
+
+    result
   end
 end
