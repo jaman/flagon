@@ -530,15 +530,9 @@ defmodule Flagon.App do
 
   @preview_label_style %{fg: {180, 180, 180}, dim: true}
   @preview_value_style %{fg: {255, 255, 255}}
-  @preview_body_style %{fg: {130, 200, 255}}
 
   defp render_preview(%{type: :function} = preview) do
-    body_lines =
-      preview.body
-      |> String.split("\n")
-      |> Enum.map(fn line -> label(line, style: @preview_body_style) end)
-
-    scrollable(
+    vertical(
       [
         label("Function: #{preview.signature}", style: %{bold: true, fg: {255, 255, 255}}),
         label(""),
@@ -548,8 +542,8 @@ defmodule Flagon.App do
         ]),
         label(""),
         label("Definition:", style: @preview_label_style),
-        label("")
-      ] ++ body_lines,
+        code_view(preview.body, language: :q, show_line_numbers: true, flex: 1)
+      ],
       flex: 1
     )
   end

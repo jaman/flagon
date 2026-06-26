@@ -7,6 +7,6 @@ defmodule Flagon do
   def start(opts \\ []) do
     config = Flagon.Config.load(opts)
     Application.put_env(:flagon, :loaded_config, config)
-    Drafter.run(Flagon.App, title: "Flagon")
+    Drafter.run(Flagon.App, title: "Flagon", syntax_highlighting: true)
   end
 end
