@@ -537,8 +537,8 @@ defmodule Flagon.App do
         label("Function: #{preview.signature}", style: %{bold: true, fg: {255, 255, 255}}),
         label(""),
         horizontal([
-          label("Parameters: ", style: @preview_label_style),
-          label(Enum.join(preview.params, ", "), style: @preview_value_style)
+          label("Parameters: ", width: 13, style: @preview_label_style),
+          label(Enum.join(preview.params, ", "), flex: 1, style: @preview_value_style)
         ]),
         label(""),
         label("Definition:", style: @preview_label_style),
