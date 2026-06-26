@@ -538,7 +538,7 @@ defmodule Flagon.App do
       |> String.split("\n")
       |> Enum.map(fn line -> label(line, style: @preview_body_style) end)
 
-    vertical(
+    scrollable(
       [
         label("Function: #{preview.signature}", style: %{bold: true, fg: {255, 255, 255}}),
         label(""),
