@@ -37,7 +37,6 @@ defmodule Flagon.App do
       conn_schemas: %{},
       conn_statuses: %{},
       query_target: first_name,
-      query_text: load_editor(first_name),
       result: nil,
       result_page: 1,
       result_tab: :result,
@@ -54,6 +53,7 @@ defmodule Flagon.App do
 
   def on_ready(state) do
     Flagon.Connection.Manager.load_connections(state.connections)
+    Drafter.set_widget_value(:query_editor, load_editor(state.query_target))
 
     statuses =
       Map.new(state.connections, fn c ->
@@ -162,7 +162,8 @@ defmodule Flagon.App do
     conn_type = connection_type_for(state.query_target, state)
     node = %{type: :table, metadata: meta}
     query = Flagon.Schema.default_query_for(node, conn_type, state.page_size)
-    run_query(%{state | query_text: query})
+    Drafter.set_widget_value(:query_editor, query)
+    run_query(state, query)
   end
 
   def handle_event(:schema_node_selected, [%{id: {:func, _, _}, metadata: meta} | _], state) do
@@ -243,7 +244,8 @@ defmodule Flagon.App do
   end
 
   def handle_event(:history_result, {:use_query, query}, state) do
-    {:ok, %{state | query_text: query, result_tab: :result}}
+    Drafter.set_widget_value(:query_editor, query)
+    {:ok, %{state | result_tab: :result}}
   end
 
   def handle_event(:show_connections, _data, state) do
@@ -272,7 +274,7 @@ defmodule Flagon.App do
 
   def on_message({:query_complete, {:ok, result}}, state) do
     if state.query_target do
-      Flagon.Query.History.add(state.executed_query || state.query_text, result, state.query_target)
+      Flagon.Query.History.add(state.executed_query, result, state.query_target)
     end
 
     %{state | result: result, executing?: false, result_page: 1, result_tab: :result, error: nil, query_task: nil}
@@ -416,7 +418,6 @@ defmodule Flagon.App do
       [
         text_area(
           id: :query_editor,
-          bind: :query_text,
           placeholder: query_placeholder(state),
           show_line_numbers: true,
           language: editor_language(state),
@@ -700,19 +701,23 @@ defmodule Flagon.App do
     entries = Flagon.Query.History.list()
 
     case Enum.at(entries, idx) do
-      nil -> {:noreply, state}
-      entry -> {:ok, %{state | query_text: entry.query, result_tab: :result}}
+      nil ->
+        {:noreply, state}
+
+      entry ->
+        Drafter.set_widget_value(:query_editor, entry.query)
+        {:ok, %{state | result_tab: :result}}
     end
   end
 
   defp switch_connection(name, state) do
-    save_editor(state.query_target, state.query_text)
+    save_editor(state.query_target, Flagon.App.QueryText.extract(:query_editor, :all))
 
     caller = self()
     status = Map.get(state.conn_statuses, name, :disconnected)
-    restored_text = load_editor(name)
+    Drafter.set_widget_value(:query_editor, load_editor(name))
 
-    state = %{state | query_target: name, error: nil, query_text: restored_text}
+    state = %{state | query_target: name, error: nil}
 
     if status == :connected do
       Flagon.Connection.Manager.switch(name)
@@ -746,7 +751,7 @@ defmodule Flagon.App do
   end
 
   defp run_query(state, override \\ nil) do
-    query_text = String.trim(override || state.query_text || "")
+    query_text = String.trim(override || Flagon.App.QueryText.extract(:query_editor, :all))
     state = %{state | preview: nil}
 
     cond do
